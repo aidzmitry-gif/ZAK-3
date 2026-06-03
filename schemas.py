@@ -19,3 +19,7 @@ class PurchaseRequestOut(BaseModel):
     item: str
     qty: int
     status: str
+
+
+class StatusUpdate(BaseModel):
+    status: str
