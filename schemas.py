@@ -6,20 +6,34 @@ from pydantic import BaseModel, ConfigDict
 
 class PurchaseRequestCreate(BaseModel):
     supplier: str
+    flag: str = ""
     item: str
     qty: int = 1
-    status: str = "new"
+    amount: float = 0
+    priority: str = "Средний"
+    owner: str = ""
+    stage: str = "need"
+    number: str = ""
+    due_date: str | None = None
+    insight: str = ""
 
 
 class PurchaseRequestOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    number: str
     supplier: str
+    flag: str = ""
     item: str
     qty: int
-    status: str
+    amount: float
+    priority: str
+    owner: str
+    stage: str
+    due_date: str | None = None
+    insight: str = ""
 
 
-class StatusUpdate(BaseModel):
-    status: str
+class StageUpdate(BaseModel):
+    stage: str
