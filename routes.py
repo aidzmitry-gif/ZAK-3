@@ -10,8 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.runtime.core import Core
 from core.runtime.deps import get_core, get_session
 from core.runtime.funnel import FunnelBoardOut, FunnelCard, build_board
-from modules.procurement.models import PurchaseRequest
-from modules.procurement.schemas import PurchaseRequestCreate, PurchaseRequestOut, StageUpdate
+from modules.procurement.models import PurchaseRequest, SupplierClaim
+from modules.procurement.schemas import (
+    PurchaseRequestCreate,
+    PurchaseRequestOut,
+    StageUpdate,
+    SupplierClaimOut,
+    SupplierClaimUpdate,
+)
 from modules.procurement.stages import STAGES
 
 router = APIRouter(tags=["procurement"])
@@ -94,6 +100,31 @@ async def update_request(
                 "entity_ref": f"purchase:{obj.id}",
             },
         )
+    await session.commit()
+    await session.refresh(obj)
+    return obj
+
+
+@router.get("/claims", response_model=list[SupplierClaimOut])
+async def list_claims(session: AsyncSession = Depends(get_session)):
+    """Претензии поставщикам (брак из производства и пр.), новые первыми."""
+    return (
+        await session.execute(select(SupplierClaim).order_by(SupplierClaim.id.desc()))
+    ).scalars().all()
+
+
+@router.patch("/claims/{claim_id}", response_model=SupplierClaimOut)
+async def update_claim(
+    claim_id: int,
+    payload: SupplierClaimUpdate,
+    session: AsyncSession = Depends(get_session),
+):
+    """Назначить поставщика и/или сменить статус претензии (закупщик)."""
+    obj = await session.get(SupplierClaim, claim_id)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Претензия не найдена")
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(obj, field, value)
     await session.commit()
     await session.refresh(obj)
     return obj

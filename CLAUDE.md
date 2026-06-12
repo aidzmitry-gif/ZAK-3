@@ -3,7 +3,7 @@
 **Тип:** git submodule → ZAK-3 (правка = коммит в этот репозиторий)
 **API-префикс:** `/procurement`
 **Схема БД:** `procurement`
-**Статус:** частично наполнен (одна модель + CRUD/воронка; без workflow, permissions, событийных подписок)
+**Статус:** частично наполнен (CRUD/воронка закупок + претензии поставщикам с автосозданием из брака производства; без workflow/permissions)
 
 ## Назначение
 Управление закупками (sourcing): ведение заявок на закупку по канбан-воронке от
@@ -12,22 +12,26 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
 прихода товара на склад (procurement → wms).
 
 ## Файлы
-- `module.py` — `ProcurementModule(ModuleContract)` + фабрика `get_module()`; регистрация роутера и виджета.
-- `models.py` — ORM-модель `PurchaseRequest` (схема `procurement`).
-- `schemas.py` — Pydantic-схемы: `PurchaseRequestCreate`, `PurchaseRequestOut`, `StageUpdate`.
+- `module.py` — `ProcurementModule(ModuleContract)` + фабрика `get_module()`; регистрация роутера, подписки `production.scrap` и виджета.
+- `models.py` — ORM-модели `PurchaseRequest`, `SupplierClaim` (схема `procurement`).
+- `schemas.py` — Pydantic-схемы: `PurchaseRequestCreate/Out`, `StageUpdate`, `SupplierClaimOut`, `SupplierClaimUpdate`.
+- `events.py` — обработчик `on_production_scrap` (брак производства → претензия поставщику).
 - `routes.py` — HTTP-API под `/procurement` + маппинг строки в `FunnelCard`.
 - `stages.py` — список стадий воронки `STAGES` (id/title/color, порядок = колонки канбана).
 - `__init__.py` — пустой пакет-маркер.
 
 ## Что регистрирует в ядре (из register())
 - **Роуты:** `core.include_router(routes.router, prefix="/procurement")`.
+- **Подписки:** `core.subscribe("production.scrap", events.on_production_scrap)` — брак → претензия.
 - **Виджет:** `core.register_widget(Widget("procurement", "Закупки", source="procurement.requests"))`.
-- Workflow / permissions / roles / telegram / подписки на события — **не регистрируются**.
+- Workflow / permissions / roles / telegram — **не регистрируются**.
 
 ## События
 - **Публикует** (emit): `procurement.received` — при PATCH-смене стадии на `qc` (приёмка/QC).
   payload: `{item, qty, warehouse: "Главный", entity_ref: "purchase:<id>"}`. Предназначено для wms (приход на склад).
-- **Подписан на** (subscribe): нет.
+- **Подписан на** (subscribe): `production.scrap` (брак в ОТК производства) → `on_production_scrap`
+  открывает претензию поставщику (`SupplierClaim`, `status="open"`, поставщик пуст). Обработчик с
+  `(payload, ctx)`: пишет в сессию relay, **коммит делает relay**, не обработчик.
 
 Эмит — через `core.event_bus.emit(session, "procurement.received", {...})` в той же
 транзакции (transactional outbox).
@@ -40,15 +44,23 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
     `created_at` (server_default now()).
   - `stage` — строка, значения из `STAGES`: `need` → `sourcing` → `nego` → `analysis` →
     `approval` → `po` → `supply` → `qc` → `done`. Это **не** Enum БД, просто String(32).
+- **`supplier_claim`** (`SupplierClaim`) — претензия поставщику (миграция `0033`):
+  - `id` (PK), `supplier` (str, пусто пока закупщик не привяжет), `item`, `reason`, `order_code`,
+    `status` (str: `open` → `resolved`/`rejected`), `source` (str, `production` для авто-претензий брака),
+    `entity_ref` (напр. `production:qc:<id>`), `created_at` (server_default now()).
+  - Создаётся автоматически обработчиком `on_production_scrap` при браке в ОТК производства.
 
 ## API-эндпоинты (ключевые)
 - `GET /procurement/requests` — плоский список заявок (сортировка по `id` desc), `list[PurchaseRequestOut]`.
 - `GET /procurement/board` — воронка: заявки сгруппированы по стадиям через `build_board(STAGES, rows, _to_card)`, `FunnelBoardOut`.
 - `POST /procurement/requests` — создать закупку (201); номер генерируется, если не задан.
 - `PATCH /procurement/requests/{req_id}` — сменить стадию; при `stage == "qc"` эмитит `procurement.received` (404 если не найдена).
+- `GET /procurement/claims` — претензии поставщикам (`list[SupplierClaimOut]`, новые первыми).
+- `PATCH /procurement/claims/{claim_id}` — назначить поставщика / сменить статус (`SupplierClaimUpdate`; 404 если не найдена).
 
 ## Межмодульные связи и зависимости
 - **procurement → wms:** событие `procurement.received` (приход на склад). Прямых вызовов других модулей нет.
+- **production → procurement:** событие `production.scrap` (брак в ОТК) → автопретензия `SupplierClaim`.
 - Использует ядро: `core.runtime.funnel` (`FunnelBoardOut`, `FunnelCard`, `build_board`),
   `core.runtime.deps` (`get_core`, `get_session`), `core.runtime.core.Core`, `core.db.base.Base`.
 

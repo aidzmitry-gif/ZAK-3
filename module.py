@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from core.runtime.contract import ModuleContract, Widget
 from core.runtime.core import Core
-from modules.procurement import routes
+from modules.procurement import events, routes
 
 
 class ProcurementModule(ModuleContract):
@@ -13,6 +13,8 @@ class ProcurementModule(ModuleContract):
 
     def register(self, core: Core) -> None:
         core.include_router(routes.router, prefix=self.api_prefix)
+        # брак в производстве → автопретензия поставщику (production → procurement, §2.5)
+        core.subscribe("production.scrap", events.on_production_scrap)
         core.register_widget(Widget("procurement", "Закупки", source="procurement.requests"))
 
 

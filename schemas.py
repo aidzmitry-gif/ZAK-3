@@ -37,3 +37,21 @@ class PurchaseRequestOut(BaseModel):
 
 class StageUpdate(BaseModel):
     stage: str
+
+
+class SupplierClaimOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    supplier: str = ""
+    item: str = ""
+    reason: str = ""
+    order_code: str = ""
+    status: str
+    source: str
+    entity_ref: str = ""
+
+
+class SupplierClaimUpdate(BaseModel):
+    supplier: str | None = None
+    status: str | None = None
