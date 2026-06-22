@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Закупки · Мониторинг цен — превью</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: "class",
+      theme: { extend: {
+        colors: {
+          canvas: "rgb(var(--canvas) / <alpha-value>)",
+          surface: "rgb(var(--surface) / <alpha-value>)",
+          sunken: "rgb(var(--sunken) / <alpha-value>)",
+          ink: "rgb(var(--ink) / <alpha-value>)",
+          muted: "rgb(var(--muted) / <alpha-value>)",
+          faint: "rgb(var(--faint) / <alpha-value>)",
+          line: "rgb(var(--line) / <alpha-value>)",
+          "line-strong": "rgb(var(--line-strong) / <alpha-value>)",
+          accent: { DEFAULT: "rgb(var(--accent) / <alpha-value>)", ink: "rgb(var(--accent-ink) / <alpha-value>)", soft: "rgb(var(--accent-soft) / <alpha-value>)" },
+          money: { DEFAULT: "rgb(var(--money) / <alpha-value>)", soft: "rgb(var(--money-soft) / <alpha-value>)" },
+        },
+        fontFamily: { sans: ["Inter","system-ui","-apple-system","Segoe UI","Roboto","Arial","sans-serif"] },
+        boxShadow: {
+          card: "0 1px 1px rgba(20,20,40,0.03), 0 2px 4px rgba(20,20,40,0.04), 0 6px 16px rgba(20,20,40,0.04), inset 0 1px 0 rgba(255,255,255,0.6)",
+          pop: "0 1px 2px rgba(20,20,40,0.06), 0 12px 28px rgba(20,20,40,0.12)",
+        },
+        borderRadius: { lg: "10px", xl: "12px", "2xl": "14px" },
+      } },
+    };
+  </script>
+  <style>
+    :root{ --canvas:238 241 245; --surface:255 255 255; --sunken:244 246 249; --ink:15 23 42; --muted:91 107 130; --faint:147 161 181; --line:226 232 240; --line-strong:203 213 225; --accent:30 94 255; --accent-ink:21 69 204; --accent-soft:227 236 255; --money:14 124 74; --money-soft:226 243 234; }
+    .dark{ --canvas:14 17 22; --surface:23 27 34; --sunken:31 36 44; --ink:232 234 237; --muted:155 163 174; --faint:107 114 128; --line:42 48 56; --line-strong:58 66 76; --accent:110 139 255; --accent-ink:138 160 255; --accent-soft:35 42 61; --money:52 211 153; --money-soft:22 39 31; }
+    body{font-family:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;font-feature-settings:"cv05","ss01";-webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
+    /* ── Панель чатов поставщиков (рейка → раскрытие по hover, overlay) — эталон из cockpit ── */
+    .chatrail{position:fixed;top:0;right:0;height:100vh;width:68px;z-index:40;
+      background:rgb(var(--surface));border-left:1px solid rgb(var(--line));transition:width .22s ease;overflow:hidden;
+      box-shadow:-8px 0 24px rgba(20,20,40,.05)}
+    .chatrail:hover{width:320px;box-shadow:-12px 0 40px rgba(20,20,40,.14)}
+    .chatrail .lbl{opacity:0;transition:opacity .18s ease;white-space:nowrap}
+    .chatrail:hover .lbl{opacity:1}
+    .chatrail .head{display:flex;align-items:center;gap:.5rem;height:56px;padding:0 14px;border-bottom:1px solid rgb(var(--line))}
+    .chatrow{display:flex;align-items:center;gap:.6rem;padding:9px 14px;cursor:pointer}
+    .chatrow:hover{background:rgb(var(--sunken))}
+    .av{position:relative;flex:0 0 auto;width:40px;height:40px;border-radius:9999px;
+      display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:#fff}
+    .badge{position:absolute;top:-3px;right:-3px;min-width:18px;height:18px;padding:0 4px;border-radius:9999px;
+      background:#ef4444;color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;border:2px solid rgb(var(--surface))}
+        .ch-flag{font-size:10px;font-weight:700;padding:1px 6px;border-radius:9999px;line-height:1.4}
+    .theme-toggle{position:fixed;bottom:16px;left:16px;z-index:70;height:40px;padding:0 14px;border-radius:9999px;background:rgb(var(--surface));border:1px solid rgb(var(--line));box-shadow:0 2px 10px rgba(20,20,40,.14);display:flex;align-items:center;gap:7px;cursor:pointer;font-size:14px;font-weight:600;color:rgb(var(--ink))}
+    .theme-toggle:hover{border-color:rgb(var(--accent))}
+    .theme-lbl{font-size:13px}
+  </style>
+</head>
+<body class="bg-canvas text-ink">
+  <button class="theme-toggle" onclick="toggleTheme()" title="Светлая / тёмная тема" aria-label="Переключить тему"><span id="themeIcon">🌙</span><span class="theme-lbl">Тёмная</span></button>
+  <script>
+    function applyTheme(d){ document.documentElement.classList.toggle('dark', d); const i=document.getElementById('themeIcon'), l=document.querySelector('.theme-lbl'); if(i) i.textContent=d?'☀️':'🌙'; if(l) l.textContent=d?'Светлая':'Тёмная'; }
+    function toggleTheme(){ const d=!document.documentElement.classList.contains('dark'); applyTheme(d); try{localStorage.setItem('zak-theme', d?'dark':'light')}catch(e){} }
+    (function(){ const p=new URLSearchParams(location.search).get('theme'); let s; try{s=localStorage.getItem('zak-theme')}catch(e){} applyTheme(p ? p==='dark' : s==='dark'); })();
+  </script>
+  <!-- ⚠️ Статичный снимок будущего Next.js-экрана /crm/procurement (Мониторинг цен). Демо-данные. -->
+
+  <!-- ============ ПАНЕЛЬ ЧАТОВ ПОСТАВЩИКОВ (right rail) — дословно из эталона cockpit ============ -->
+  <aside class="chatrail">
+    <div class="head">
+      <span class="text-lg">💬</span>
+      <span class="lbl text-sm font-semibold text-ink">Переписка с поставщиками</span>
+    </div>
+    <div class="lbl px-3.5 py-2 text-[11px] text-violet-600 dark:text-violet-300 bg-violet-50/60 dark:bg-violet-500/15 border-b border-violet-100 dark:border-violet-500/40">
+      ✦ ИИ ведёт 7 диалогов · 3 черновика ответа ждут отправки
+    </div>
+    <div class="chatrow">
+      <span class="av" style="background:#0ea5e9">深<span class="badge">2</span></span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">Shenzhen Hangxin 深圳航芯</span>
+          <span class="ch-flag bg-emerald-50 dark:bg-emerald-500/15 text-emerald-600 dark:text-emerald-300">WeChat</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">价格已更新到 ¥3.85/шт · обновил цену по чипам</span>
+      </span>
+    </div>
+    <div class="chatrow">
+      <span class="av" style="background:#6366f1">YX<span class="badge">1</span></span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">Yuxin Electronics</span>
+          <span class="ch-flag bg-blue-50 dark:bg-blue-500/15 text-blue-600 dark:text-blue-300">email</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">PI attached, lead time 25 days</span>
+      </span>
+    </div>
+    <div class="chatrow">
+      <span class="av" style="background:#f59e0b">ИП<span class="badge">3</span></span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">Иванов П. · продавец</span>
+          <span class="ch-flag bg-amber-50 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300">внутр.</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">Клиент ждёт срок по партии конденсаторов</span>
+      </span>
+    </div>
+    <div class="chatrow">
+      <span class="av" style="background:#ef4444">阿</span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">阿里巴巴 商家 (1688)</span>
+          <span class="ch-flag bg-orange-50 dark:bg-orange-500/15 text-orange-600 dark:text-orange-300">1688</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">新报价: 50000шт @ ¥0.42</span>
+      </span>
+    </div>
+    <div class="chatrow">
+      <span class="av" style="background:#14b8a6">淘</span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">Taobao 店铺 · разъёмы</span>
+          <span class="ch-flag bg-rose-50 dark:bg-rose-500/15 text-rose-600 dark:text-rose-300">Taobao</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">现货充足 · в наличии, готов к отгрузке</span>
+      </span>
+    </div>
+    <div class="chatrow">
+      <span class="av" style="background:#8b5cf6">SZ</span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">Suzhou Precision</span>
+          <span class="ch-flag bg-blue-50 dark:bg-blue-500/15 text-blue-600 dark:text-blue-300">email</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">QC report ready, photos sent</span>
+      </span>
+    </div>
+    <div class="lbl px-3.5 py-2.5 mt-1 text-[11px] text-faint">
+      ИИ переводит, отвечает по шаблону и поднимает важное наверх. Канал, тон и история — в карточке диалога.
+    </div>
+  </aside>
+
+  <!-- ============ ОСНОВНОЙ КОНТЕНТ ============ -->
+  <div class="mx-auto max-w-[1180px] space-y-4 p-6 pr-[92px]">
+
+    <!-- Заголовок -->
+    <div>
+      <h1 class="text-xl font-bold text-ink">Мониторинг цен и контрагентов</h1>
+      <p class="mt-1 text-sm text-muted">
+        ИИ ежедневно сканирует 1688 / Taobao / Alibaba по постоянно закупаемым товарам: ловит рост цен,
+        ищет аналоги дешевле и проверяет надёжность китайских контрагентов до предоплаты.
+      </p>
+    </div>
+
+    <!-- Вкладки закупок (Мониторинг цен активна) -->
+    <div class="flex flex-wrap gap-1.5 text-[13px]">
+      <a href="zak-cockpit-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">Обзор</a>
+      <a href="zak-price-inquiry-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">Запросы цены</a>
+      <a href="zak-board-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">Воронка</a>
+      <a href="zak-shipment-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">Машины</a>
+      <a href="zak-ai-comms-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">AI-переписка</a>
+      <span class="rounded-full bg-accent px-3 py-1.5 font-semibold text-white shadow-card">Мониторинг цен</span>
+      <a href="zak-landed-cost-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">Себестоимость</a>
+    </div>
+
+    <!-- Метрики -->
+    <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div class="rounded-2xl bg-surface p-4 shadow-card">
+        <div class="text-[11px] font-semibold uppercase tracking-wide text-faint">Товаров на контроле</div>
+        <div class="mt-1 text-2xl font-bold text-ink">64</div>
+        <div class="mt-1 text-[12px] text-muted">постоянная закупка</div>
+      </div>
+      <div class="rounded-2xl bg-surface p-4 shadow-card">
+        <div class="text-[11px] font-semibold uppercase tracking-wide text-faint">Алертов за неделю</div>
+        <div class="mt-1 text-2xl font-bold text-amber-600 dark:text-amber-300">5</div>
+        <div class="mt-1 text-[12px] text-muted">рост цены / дефицит</div>
+      </div>
+      <div class="rounded-2xl bg-surface p-4 shadow-card">
+        <div class="text-[11px] font-semibold uppercase tracking-wide text-faint">Экономия</div>
+        <div class="mt-1 text-2xl font-bold text-emerald-600 dark:text-emerald-300">~6 200</div>
+        <div class="mt-1 text-[12px] text-muted">BYN/мес · переключение на аналоги</div>
+      </div>
+      <div class="rounded-2xl bg-surface p-4 shadow-card">
+        <div class="text-[11px] font-semibold uppercase tracking-wide text-faint">Контрагентов на проверке</div>
+        <div class="mt-1 text-2xl font-bold text-ink">3</div>
+        <div class="mt-1 text-[12px] text-red-600 dark:text-red-300">1 — риск</div>
+      </div>
+    </div>
+
+    <!-- Алерты цен -->
+    <section class="rounded-2xl bg-surface p-5 shadow-card">
+      <div class="text-[11px] font-semibold uppercase tracking-wide text-faint">Алерты цен · требуют решения</div>
+      <div class="mt-3 space-y-2.5">
+        <div class="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-red-200 dark:border-red-500/40 bg-red-50 dark:bg-red-500/15 p-3">
+          <span class="min-w-0">
+            <span class="block text-sm font-semibold text-ink">STM32F103C8T6 <span class="ml-1 font-bold text-red-600 dark:text-red-300">↑ +12%</span> за неделю</span>
+            <span class="block text-[12px] text-muted">1688 · ¥3.85 → ¥4.31 · есть аналог GD32F103 у Hangxin <span class="font-semibold text-emerald-600 dark:text-emerald-300">−8%</span></span>
+          </span>
+          <span class="shrink-0 inline-flex items-center rounded-lg border border-line bg-surface px-3 py-1.5 text-[12px] font-semibold text-muted">Переключить поставщика</span>
+        </div>
+        <div class="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-200 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-500/15 p-3">
+          <span class="min-w-0">
+            <span class="block text-sm font-semibold text-ink">Конденсатор 470мкФ 25В <span class="ml-1 font-bold text-amber-600 dark:text-amber-300">↑ +6%</span></span>
+            <span class="block text-[12px] text-muted">Taobao · ¥0.42 → ¥0.445 · порог алерта +5% превышен</span>
+          </span>
+          <span class="shrink-0 inline-flex items-center rounded-lg border border-line bg-surface px-3 py-1.5 text-[12px] font-semibold text-muted">Сравнить площадки</span>
+        </div>
+        <div class="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-200 dark:border-emerald-500/40 bg-emerald-50 dark:bg-emerald-500/15 p-3">
+          <span class="min-w-0">
+            <span class="block text-sm font-semibold text-ink">Разъём USB-C 24pin <span class="ml-1 font-bold text-emerald-600 dark:text-emerald-300">↓ −9%</span></span>
+            <span class="block text-[12px] text-muted">Alibaba · ¥1.10 → ¥1.00 · удачный момент закупить под пополнение</span>
+          </span>
+          <span class="shrink-0 inline-flex items-center rounded-lg border border-line bg-surface px-3 py-1.5 text-[12px] font-semibold text-muted">В заявку</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Watchlist -->
+    <section class="rounded-2xl bg-surface p-5 shadow-card">
+      <div class="text-[11px] font-semibold uppercase tracking-wide text-faint">Список наблюдения (watchlist)</div>
+      <div class="mt-3 overflow-x-auto">
+        <table class="w-full min-w-[760px] text-sm">
+          <thead>
+            <tr class="border-b border-line text-left text-[11px] font-semibold uppercase tracking-wide text-faint">
+              <th class="py-2 pr-3 font-semibold">Товар</th>
+              <th class="py-2 pr-3 font-semibold">Площадка</th>
+              <th class="py-2 pr-3 font-semibold">Цена ¥</th>
+              <th class="py-2 pr-3 font-semibold">Δ нед.</th>
+              <th class="py-2 pr-3 font-semibold">Порог</th>
+              <th class="py-2 pr-3 font-semibold">Динамика</th>
+              <th class="py-2 pr-3 font-semibold">Поставщик</th>
+              <th class="py-2 font-semibold">Аналоги</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <tr>
+              <td class="py-2.5 pr-3 font-medium text-ink">STM32F103C8T6</td>
+              <td class="py-2.5 pr-3"><span class="inline-flex items-center rounded-full bg-orange-50 dark:bg-orange-500/15 px-2 py-0.5 text-[11px] font-semibold text-orange-600 dark:text-orange-300">1688</span></td>
+              <td class="py-2.5 pr-3">4.31</td>
+              <td class="py-2.5 pr-3 font-semibold text-red-600 dark:text-red-300">↑ +12%</td>
+              <td class="py-2.5 pr-3 text-muted">+10%</td>
+              <td class="py-2.5 pr-3"><span class="flex items-end gap-0.5 h-8"><span class="w-1.5 rounded-sm bg-line" style="height:40%"></span><span class="w-1.5 rounded-sm bg-line" style="height:45%"></span><span class="w-1.5 rounded-sm bg-line" style="height:42%"></span><span class="w-1.5 rounded-sm bg-amber-400" style="height:60%"></span><span class="w-1.5 rounded-sm bg-red-500" style="height:85%"></span></span></td>
+              <td class="py-2.5 pr-3 text-muted">Yuxin</td>
+              <td class="py-2.5"><span class="inline-flex items-center rounded-full bg-emerald-50 dark:bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">2 дешевле</span></td>
+            </tr>
+            <tr>
+              <td class="py-2.5 pr-3 font-medium text-ink">Конденсатор 470мкФ 25В</td>
+              <td class="py-2.5 pr-3"><span class="inline-flex items-center rounded-full bg-rose-50 dark:bg-rose-500/15 px-2 py-0.5 text-[11px] font-semibold text-rose-600 dark:text-rose-300">Taobao</span></td>
+              <td class="py-2.5 pr-3">0.445</td>
+              <td class="py-2.5 pr-3 font-semibold text-amber-600 dark:text-amber-300">↑ +6%</td>
+              <td class="py-2.5 pr-3 text-muted">+5%</td>
+              <td class="py-2.5 pr-3"><span class="flex items-end gap-0.5 h-8"><span class="w-1.5 rounded-sm bg-line" style="height:50%"></span><span class="w-1.5 rounded-sm bg-line" style="height:48%"></span><span class="w-1.5 rounded-sm bg-line" style="height:52%"></span><span class="w-1.5 rounded-sm bg-line" style="height:55%"></span><span class="w-1.5 rounded-sm bg-amber-400" style="height:68%"></span></span></td>
+              <td class="py-2.5 pr-3 text-muted">Suzhou</td>
+              <td class="py-2.5"><span class="inline-flex items-center rounded-full bg-sunken px-2 py-0.5 text-[11px] font-semibold text-muted">1 аналог</span></td>
+            </tr>
+            <tr>
+              <td class="py-2.5 pr-3 font-medium text-ink">Разъём USB-C 24pin</td>
+              <td class="py-2.5 pr-3"><span class="inline-flex items-center rounded-full bg-blue-50 dark:bg-blue-500/15 px-2 py-0.5 text-[11px] font-semibold text-blue-600 dark:text-blue-300">Alibaba</span></td>
+              <td class="py-2.5 pr-3">1.00</td>
+              <td class="py-2.5 pr-3 font-semibold text-emerald-600 dark:text-emerald-300">↓ −9%</td>
+              <td class="py-2.5 pr-3 text-muted">±8%</td>
+              <td class="py-2.5 pr-3"><span class="flex items-end gap-0.5 h-8"><span class="w-1.5 rounded-sm bg-line" style="height:75%"></span><span class="w-1.5 rounded-sm bg-line" style="height:72%"></span><span class="w-1.5 rounded-sm bg-line" style="height:68%"></span><span class="w-1.5 rounded-sm bg-line" style="height:60%"></span><span class="w-1.5 rounded-sm bg-emerald-500" style="height:48%"></span></span></td>
+              <td class="py-2.5 pr-3 text-muted">Shenzhen Hangxin</td>
+              <td class="py-2.5"><span class="inline-flex items-center rounded-full bg-sunken px-2 py-0.5 text-[11px] font-semibold text-muted">3 аналога</span></td>
+            </tr>
+            <tr>
+              <td class="py-2.5 pr-3 font-medium text-ink">Реле SRD-05VDC 10A</td>
+              <td class="py-2.5 pr-3"><span class="inline-flex items-center rounded-full bg-orange-50 dark:bg-orange-500/15 px-2 py-0.5 text-[11px] font-semibold text-orange-600 dark:text-orange-300">1688</span></td>
+              <td class="py-2.5 pr-3">0.78</td>
+              <td class="py-2.5 pr-3 font-semibold text-muted">→ 0%</td>
+              <td class="py-2.5 pr-3 text-muted">+7%</td>
+              <td class="py-2.5 pr-3"><span class="flex items-end gap-0.5 h-8"><span class="w-1.5 rounded-sm bg-line" style="height:55%"></span><span class="w-1.5 rounded-sm bg-line" style="height:54%"></span><span class="w-1.5 rounded-sm bg-line" style="height:55%"></span><span class="w-1.5 rounded-sm bg-line" style="height:53%"></span><span class="w-1.5 rounded-sm bg-line" style="height:55%"></span></span></td>
+              <td class="py-2.5 pr-3 text-muted">Yuxin</td>
+              <td class="py-2.5"><span class="inline-flex items-center rounded-full bg-sunken px-2 py-0.5 text-[11px] font-semibold text-muted">2 аналога</span></td>
+            </tr>
+            <tr>
+              <td class="py-2.5 pr-3 font-medium text-ink">Дроссель 100мкГн SMD</td>
+              <td class="py-2.5 pr-3"><span class="inline-flex items-center rounded-full bg-rose-50 dark:bg-rose-500/15 px-2 py-0.5 text-[11px] font-semibold text-rose-600 dark:text-rose-300">Taobao</span></td>
+              <td class="py-2.5 pr-3">0.31</td>
+              <td class="py-2.5 pr-3 font-semibold text-emerald-600 dark:text-emerald-300">↓ −3%</td>
+              <td class="py-2.5 pr-3 text-muted">±6%</td>
+              <td class="py-2.5 pr-3"><span class="flex items-end gap-0.5 h-8"><span class="w-1.5 rounded-sm bg-line" style="height:60%"></span><span class="w-1.5 rounded-sm bg-line" style="height:58%"></span><span class="w-1.5 rounded-sm bg-line" style="height:57%"></span><span class="w-1.5 rounded-sm bg-line" style="height:55%"></span><span class="w-1.5 rounded-sm bg-emerald-500" style="height:52%"></span></span></td>
+              <td class="py-2.5 pr-3 text-muted">Suzhou Precision</td>
+              <td class="py-2.5"><span class="inline-flex items-center rounded-full bg-sunken px-2 py-0.5 text-[11px] font-semibold text-muted">1 аналог</span></td>
+            </tr>
+            <tr>
+              <td class="py-2.5 pr-3 font-medium text-ink">LED 5мм красный</td>
+              <td class="py-2.5 pr-3"><span class="inline-flex items-center rounded-full bg-orange-50 dark:bg-orange-500/15 px-2 py-0.5 text-[11px] font-semibold text-orange-600 dark:text-orange-300">1688</span></td>
+              <td class="py-2.5 pr-3">0.07</td>
+              <td class="py-2.5 pr-3 font-semibold text-muted">→ +1%</td>
+              <td class="py-2.5 pr-3 text-muted">+8%</td>
+              <td class="py-2.5 pr-3"><span class="flex items-end gap-0.5 h-8"><span class="w-1.5 rounded-sm bg-line" style="height:50%"></span><span class="w-1.5 rounded-sm bg-line" style="height:50%"></span><span class="w-1.5 rounded-sm bg-line" style="height:51%"></span><span class="w-1.5 rounded-sm bg-line" style="height:50%"></span><span class="w-1.5 rounded-sm bg-line" style="height:51%"></span></span></td>
+              <td class="py-2.5 pr-3 text-muted">Shenzhen Hangxin</td>
+              <td class="py-2.5"><span class="inline-flex items-center rounded-full bg-sunken px-2 py-0.5 text-[11px] font-semibold text-muted">4 аналога</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Проверка контрагентов -->
+    <section class="rounded-2xl bg-surface p-5 shadow-card">
+      <div class="text-[11px] font-semibold uppercase tracking-wide text-faint">Проверка контрагентов в Китае · реестр</div>
+      <div class="mt-3 overflow-x-auto">
+        <table class="w-full min-w-[760px] text-sm">
+          <thead>
+            <tr class="border-b border-line text-left text-[11px] font-semibold uppercase tracking-wide text-faint">
+              <th class="py-2 pr-3 font-semibold">Контрагент</th>
+              <th class="py-2 pr-3 font-semibold">Площадка</th>
+              <th class="py-2 pr-3 font-semibold">Лет на рынке</th>
+              <th class="py-2 pr-3 font-semibold">Капитал</th>
+              <th class="py-2 pr-3 font-semibold">Суды / жалобы</th>
+              <th class="py-2 pr-3 font-semibold">Источник</th>
+              <th class="py-2 font-semibold">Рейтинг ИИ</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <tr>
+              <td class="py-2.5 pr-3 font-medium text-ink">Shenzhen Hangxin 深圳航芯</td>
+              <td class="py-2.5 pr-3 text-muted">WeChat / 1688</td>
+              <td class="py-2.5 pr-3">8</td>
+              <td class="py-2.5 pr-3 text-muted">高 (крупный)</td>
+              <td class="py-2.5 pr-3 text-emerald-600 dark:text-emerald-300">нет</td>
+              <td class="py-2.5 pr-3 text-muted">企信宝</td>
+              <td class="py-2.5"><span class="inline-flex items-center rounded-full bg-emerald-50 dark:bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">Надёжный</span></td>
+            </tr>
+            <tr>
+              <td class="py-2.5 pr-3 font-medium text-ink">Yuxin Electronics</td>
+              <td class="py-2.5 pr-3 text-muted">email / Alibaba</td>
+              <td class="py-2.5 pr-3">2</td>
+              <td class="py-2.5 pr-3 text-muted">小 (малый)</td>
+              <td class="py-2.5 pr-3 text-amber-600 dark:text-amber-300">1 спор</td>
+              <td class="py-2.5 pr-3 text-muted">企信宝</td>
+              <td class="py-2.5"><span class="inline-flex items-center rounded-full bg-amber-50 dark:bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-700 dark:text-amber-300">Осторожно</span></td>
+            </tr>
+            <tr>
+              <td class="py-2.5 pr-3 font-medium text-ink">Suzhou Precision</td>
+              <td class="py-2.5 pr-3 text-muted">email</td>
+              <td class="py-2.5 pr-3">6</td>
+              <td class="py-2.5 pr-3 text-muted">中 (средний)</td>
+              <td class="py-2.5 pr-3 text-emerald-600 dark:text-emerald-300">нет</td>
+              <td class="py-2.5 pr-3 text-muted">天眼查</td>
+              <td class="py-2.5"><span class="inline-flex items-center rounded-full bg-emerald-50 dark:bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">Надёжный</span></td>
+            </tr>
+            <tr>
+              <td class="py-2.5 pr-3 font-medium text-ink">Новый поставщик (1688)</td>
+              <td class="py-2.5 pr-3 text-muted">1688</td>
+              <td class="py-2.5 pr-3">&lt;1</td>
+              <td class="py-2.5 pr-3 text-muted">микро</td>
+              <td class="py-2.5 pr-3 text-red-600 dark:text-red-300">жалобы найдены</td>
+              <td class="py-2.5 pr-3 text-muted">企信宝 + отзывы</td>
+              <td class="py-2.5"><span class="inline-flex items-center rounded-full bg-red-50 dark:bg-red-500/15 px-2 py-0.5 text-[11px] font-semibold text-red-600 dark:text-red-300">Риск</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="mt-3 text-[12px] text-muted">ИИ собирает данные из 企信宝 / 天眼查, истории сделок и отзывов на 1688/Alibaba, выставляет рейтинг и поднимает риски <span class="font-semibold">до предоплаты</span>.</p>
+    </section>
+
+    <!-- ИИ-блок -->
+    <div class="rounded-2xl border border-dashed border-violet-300 dark:border-violet-500/40 bg-violet-50 dark:bg-violet-500/15 p-5">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <span class="flex items-center gap-2">
+          <span class="text-violet-500 dark:text-violet-300">✦</span>
+          <span class="text-[11px] font-semibold uppercase tracking-wide text-violet-600 dark:text-violet-300">ИИ-агент мониторинга · что делает сам</span>
+        </span>
+        <span class="inline-flex items-center rounded-full bg-violet-50 dark:bg-violet-500/15 px-2 py-0.5 text-[11px] font-semibold text-violet-600 dark:text-violet-300">Итерация 1 · ИИ (позже)</span>
+      </div>
+      <div class="mt-3 space-y-2">
+        <div class="flex items-start justify-between gap-3"><span class="text-sm text-violet-700 dark:text-violet-300"><span class="font-semibold">1 ·</span> Ежедневно сканирует 1688/Taobao/Alibaba по watchlist, сверяет с порогами и шлёт алерт при росте цены или дефиците.</span><span class="shrink-0"><span class="inline-flex items-center rounded-full bg-violet-50 dark:bg-violet-500/15 px-2 py-0.5 text-[11px] font-semibold text-violet-600 dark:text-violet-300">скан цен</span></span></div>
+        <div class="flex items-start justify-between gap-3"><span class="text-sm text-violet-700 dark:text-violet-300"><span class="font-semibold">2 ·</span> Находит аналоги дешевле у проверенных поставщиков и предлагает переключение под текущую закупку/машину.</span><span class="shrink-0"><span class="inline-flex items-center rounded-full bg-violet-50 dark:bg-violet-500/15 px-2 py-0.5 text-[11px] font-semibold text-violet-600 dark:text-violet-300">аналоги</span></span></div>
+        <div class="flex items-start justify-between gap-3"><span class="text-sm text-violet-700 dark:text-violet-300"><span class="font-semibold">3 ·</span> Проверяет новых поставщиков (企信宝/天眼查 + история + отзывы) и выставляет рейтинг надёжности до предоплаты.</span><span class="shrink-0"><span class="inline-flex items-center rounded-full bg-violet-50 dark:bg-violet-500/15 px-2 py-0.5 text-[11px] font-semibold text-violet-600 dark:text-violet-300">контрагенты</span></span></div>
+      </div>
+    </div>
+
+    <p class="text-xs text-faint">Превью-снимок. Демо-данные (BYN/¥). Работает навигация по вкладкам и наведение на панель чатов справа.</p>
+  </div>
+</body>
+</html>
