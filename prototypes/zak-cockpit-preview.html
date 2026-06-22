@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Закупки · Обзор — превью</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    // Утверждённый дизайн (frontend/DESIGN.md, 2026-06-17): токены C+D через CSS-переменные,
+    // Inter + tabular-nums, мягкие тени, акцент #1E5EFF, деньги #0E7C4A. Тёмная тема — класс .dark.
+    tailwind.config = {
+      darkMode: "class",
+      theme: { extend: {
+        colors: {
+          canvas: "rgb(var(--canvas) / <alpha-value>)",
+          surface: "rgb(var(--surface) / <alpha-value>)",
+          sunken: "rgb(var(--sunken) / <alpha-value>)",
+          ink: "rgb(var(--ink) / <alpha-value>)",
+          muted: "rgb(var(--muted) / <alpha-value>)",
+          faint: "rgb(var(--faint) / <alpha-value>)",
+          line: "rgb(var(--line) / <alpha-value>)",
+          "line-strong": "rgb(var(--line-strong) / <alpha-value>)",
+          accent: { DEFAULT: "rgb(var(--accent) / <alpha-value>)", ink: "rgb(var(--accent-ink) / <alpha-value>)", soft: "rgb(var(--accent-soft) / <alpha-value>)" },
+          money: { DEFAULT: "rgb(var(--money) / <alpha-value>)", soft: "rgb(var(--money-soft) / <alpha-value>)" },
+        },
+        fontFamily: { sans: ["Inter","system-ui","-apple-system","Segoe UI","Roboto","Arial","sans-serif"] },
+        boxShadow: {
+          card: "0 1px 1px rgba(20,20,40,0.03), 0 2px 4px rgba(20,20,40,0.04), 0 6px 16px rgba(20,20,40,0.04), inset 0 1px 0 rgba(255,255,255,0.6)",
+          pop: "0 1px 2px rgba(20,20,40,0.06), 0 12px 28px rgba(20,20,40,0.12)",
+        },
+        borderRadius: { lg: "10px", xl: "12px", "2xl": "14px" },
+      } },
+    };
+  </script>
+  <style>
+    /* Токены тем C (светлая, по умолчанию) и D (тёмная, .dark на <html>) — из frontend/globals.css. */
+    :root{ --canvas:238 241 245; --surface:255 255 255; --sunken:244 246 249; --ink:15 23 42; --muted:91 107 130; --faint:147 161 181; --line:226 232 240; --line-strong:203 213 225; --accent:30 94 255; --accent-ink:21 69 204; --accent-soft:227 236 255; --money:14 124 74; --money-soft:226 243 234; }
+    .dark{ --canvas:14 17 22; --surface:23 27 34; --sunken:31 36 44; --ink:232 234 237; --muted:155 163 174; --faint:107 114 128; --line:42 48 56; --line-strong:58 66 76; --accent:110 139 255; --accent-ink:138 160 255; --accent-soft:35 42 61; --money:52 211 153; --money-soft:22 39 31; }
+    body{font-family:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;font-feature-settings:"cv05","ss01";-webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
+    /* ── Панель чатов поставщиков (рейка → раскрытие по hover) — адаптируется к теме ── */
+    .chatrail{position:fixed;top:0;right:0;height:100vh;width:68px;z-index:40;
+      background:rgb(var(--surface));border-left:1px solid rgb(var(--line));transition:width .22s ease;overflow:hidden;
+      box-shadow:-8px 0 24px rgba(20,20,40,.05)}
+    .chatrail:hover{width:320px;box-shadow:-12px 0 40px rgba(20,20,40,.14)}
+    .chatrail .lbl{opacity:0;transition:opacity .18s ease;white-space:nowrap}
+    .chatrail:hover .lbl{opacity:1}
+    .chatrail .head{display:flex;align-items:center;gap:.5rem;height:56px;padding:0 14px;border-bottom:1px solid rgb(var(--line))}
+    .chatrow{display:flex;align-items:center;gap:.6rem;padding:9px 14px;cursor:pointer}
+    .chatrow:hover{background:rgb(var(--sunken))}
+    .av{position:relative;flex:0 0 auto;width:40px;height:40px;border-radius:9999px;
+      display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:#fff}
+    .badge{position:absolute;top:-3px;right:-3px;min-width:18px;height:18px;padding:0 4px;border-radius:9999px;
+      background:#ef4444;color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;border:2px solid rgb(var(--surface))}
+    .ch-flag{font-size:10px;font-weight:700;padding:1px 6px;border-radius:9999px;line-height:1.4}
+    /* тоггл светлая/тёмная — фиксирован слева снизу (не мешает рейке чатов справа) */
+    .theme-toggle{position:fixed;bottom:16px;left:16px;z-index:60;height:40px;padding:0 14px;border-radius:9999px;
+      background:rgb(var(--surface));border:1px solid rgb(var(--line));box-shadow:0 2px 10px rgba(20,20,40,.14);
+      display:flex;align-items:center;gap:7px;cursor:pointer;font-size:14px;font-weight:600;color:rgb(var(--ink))}
+    .theme-toggle:hover{border-color:rgb(var(--accent))}
+    .theme-lbl{font-size:13px}
+  </style>
+</head>
+<body class="bg-canvas text-ink">
+  <!-- тоггл светлая/тёмная тема (утв. дизайн C+D) -->
+  <button class="theme-toggle" id="themeBtn" onclick="toggleTheme()" title="Светлая / тёмная тема" aria-label="Переключить тему"><span id="themeIcon">🌙</span><span class="theme-lbl">Тёмная</span></button>
+  <script>
+    // тема C/D: ?theme=dark или сохранённый выбор; кнопка переключает и запоминает
+    function applyTheme(d){
+      document.documentElement.classList.toggle('dark', d);
+      const i=document.getElementById('themeIcon'), l=document.querySelector('.theme-lbl');
+      if(i) i.textContent = d ? '☀️' : '🌙';
+      if(l) l.textContent = d ? 'Светлая' : 'Тёмная';
+    }
+    function toggleTheme(){ const d=!document.documentElement.classList.contains('dark'); applyTheme(d); try{localStorage.setItem('zak-theme', d?'dark':'light')}catch(e){} }
+    (function(){ const p=new URLSearchParams(location.search).get('theme'); let saved; try{saved=localStorage.getItem('zak-theme')}catch(e){} applyTheme(p ? p==='dark' : saved==='dark'); })();
+  </script>
+  <!-- ⚠️ Статичный снимок будущего Next.js-экрана /crm/procurement (Обзор) для визуальной проверки.
+       Демо-данные, валюта BYN; CNY/$ — для китайских инвойсов. Кнопки/формы не активны, работает навигация по вкладкам. -->
+
+  <!-- ============ ПАНЕЛЬ ЧАТОВ ПОСТАВЩИКОВ (right rail) ============ -->
+  <aside class="chatrail">
+    <div class="head">
+      <span class="text-lg">💬</span>
+      <span class="lbl text-sm font-semibold text-ink">Переписка с поставщиками</span>
+    </div>
+
+    <!-- AI-сводка над списком (видна при раскрытии) -->
+    <div class="lbl px-3.5 py-2 text-[11px] text-violet-600 dark:text-violet-300 bg-violet-50/60 dark:bg-violet-500/15 border-b border-violet-100 dark:border-violet-500/40">
+      ✦ ИИ ведёт 7 диалогов · 3 черновика ответа ждут отправки
+    </div>
+
+    <!-- Поставщик 1 — WeChat -->
+    <div class="chatrow">
+      <span class="av" style="background:#0ea5e9">深<span class="badge">2</span></span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">Shenzhen Hangxin 深圳航芯</span>
+          <span class="ch-flag bg-emerald-50 dark:bg-emerald-500/15 text-emerald-600 dark:text-emerald-300">WeChat</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">价格已更新到 ¥3.85/шт · обновил цену по чипам</span>
+      </span>
+    </div>
+
+    <!-- Поставщик 2 — email -->
+    <div class="chatrow">
+      <span class="av" style="background:#6366f1">YX<span class="badge">1</span></span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">Yuxin Electronics</span>
+          <span class="ch-flag bg-blue-50 dark:bg-blue-500/15 text-blue-600 dark:text-blue-300">email</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">PI attached, lead time 25 days</span>
+      </span>
+    </div>
+
+    <!-- Продавец (внутр.) -->
+    <div class="chatrow">
+      <span class="av" style="background:#f59e0b">ИП<span class="badge">3</span></span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">Иванов П. · продавец</span>
+          <span class="ch-flag bg-amber-50 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300">внутр.</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">Клиент ждёт срок по партии конденсаторов</span>
+      </span>
+    </div>
+
+    <!-- Поставщик 3 — 1688 -->
+    <div class="chatrow">
+      <span class="av" style="background:#ef4444">阿</span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">阿里巴巴 商家 (1688)</span>
+          <span class="ch-flag bg-orange-50 dark:bg-orange-500/15 text-orange-600 dark:text-orange-300">1688</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">新报价: 50000шт @ ¥0.42</span>
+      </span>
+    </div>
+
+    <!-- Поставщик 4 — Taobao -->
+    <div class="chatrow">
+      <span class="av" style="background:#14b8a6">淘</span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">Taobao 店铺 · разъёмы</span>
+          <span class="ch-flag bg-rose-50 dark:bg-rose-500/15 text-rose-600 dark:text-rose-300">Taobao</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">现货充足 · в наличии, готов к отгрузке</span>
+      </span>
+    </div>
+
+    <!-- Поставщик 5 -->
+    <div class="chatrow">
+      <span class="av" style="background:#8b5cf6">SZ</span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">Suzhou Precision</span>
+          <span class="ch-flag bg-blue-50 dark:bg-blue-500/15 text-blue-600 dark:text-blue-300">email</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">QC report ready, photos sent</span>
+      </span>
+    </div>
+
+    <div class="lbl px-3.5 py-2.5 mt-1 text-[11px] text-faint">
+      ИИ переводит, отвечает по шаблону и поднимает важное наверх. Канал, тон и история — в карточке диалога.
+    </div>
+  </aside>
+
+  <!-- ============ ОСНОВНОЙ КОНТЕНТ (с отступом под рейку) ============ -->
+  <div class="mx-auto max-w-[1180px] space-y-4 p-6 pr-[92px]">
+
+    <!-- Заголовок -->
+    <div>
+      <h1 class="text-xl font-bold text-ink">Закупки · обзор</h1>
+      <p class="mt-1 text-sm text-muted">
+        Пульс закупок: запросы цены от продавцов → заявки в работе → машины в пути (Китай → Минск) →
+        себестоимость в прайс. ИИ ведёт переписку с поставщиками и следит за ценами. Валюта — BYN; китайские инвойсы — CNY/$.
+      </p>
+    </div>
+
+    <!-- Вкладки закупок (Обзор активна) -->
+    <div class="flex flex-wrap gap-1.5 text-[13px]">
+      <span class="rounded-full bg-accent px-3 py-1.5 font-semibold text-white shadow-card">Обзор</span>
+      <a href="zak-price-inquiry-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">Запросы цены</a>
+      <a href="zak-board-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">Воронка</a>
+      <a href="zak-shipment-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">Машины</a>
+      <a href="zak-ai-comms-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">AI-переписка</a>
+      <a href="zak-price-monitor-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">Мониторинг цен</a>
+      <a href="zak-landed-cost-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">Себестоимость</a>
+    </div>
+
+    <!-- KPI-полоса -->
+    <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+      <div class="rounded-2xl bg-surface p-4 shadow-card">
+        <div class="text-[11px] font-semibold uppercase tracking-wide text-faint">Запросы цены</div>
+        <div class="mt-1 text-2xl font-bold text-ink">8</div>
+        <div class="mt-1 text-[12px] text-amber-600 dark:text-amber-300">3 ждут ответа продавцу &gt;24ч</div>
+      </div>
+      <div class="rounded-2xl bg-surface p-4 shadow-card">
+        <div class="text-[11px] font-semibold uppercase tracking-wide text-faint">Заявки в работе</div>
+        <div class="mt-1 text-2xl font-bold text-ink">23</div>
+        <div class="mt-1 text-[12px] text-muted">под сделки 14 · пополнение 9</div>
+      </div>
+      <div class="rounded-2xl bg-surface p-4 shadow-card">
+        <div class="text-[11px] font-semibold uppercase tracking-wide text-faint">Машины в пути</div>
+        <div class="mt-1 text-2xl font-bold text-ink">3</div>
+        <div class="mt-1 text-[12px] text-emerald-600 dark:text-emerald-300">ближайшая — таможня Минск, 2 дня</div>
+      </div>
+      <div class="rounded-2xl bg-surface p-4 shadow-card">
+        <div class="text-[11px] font-semibold uppercase tracking-wide text-faint">Экономия (мониторинг)</div>
+        <div class="mt-1 text-2xl font-bold text-money">~6 200</div>
+        <div class="mt-1 text-[12px] text-muted">BYN/мес · ловит рост цен на 1688</div>
+      </div>
+      <div class="rounded-2xl bg-surface p-4 shadow-card">
+        <div class="text-[11px] font-semibold uppercase tracking-wide text-faint">ИИ-переписка</div>
+        <div class="mt-1 text-2xl font-bold text-violet-600 dark:text-violet-300">41</div>
+        <div class="mt-1 text-[12px] text-muted">ответов за день · 3 черновика на ревью</div>
+      </div>
+    </div>
+
+    <!-- Машины в пути — мини-таймлайн -->
+    <section class="rounded-2xl bg-surface p-5 shadow-card">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div class="text-[11px] font-semibold uppercase tracking-wide text-faint">Машины в пути · график сбора (Китай → Минск)</div>
+        <a href="zak-shipment-preview.html" class="text-[12px] font-semibold text-accent hover:underline">Все машины →</a>
+      </div>
+
+      <!-- легенда вех -->
+      <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-faint">
+        <span>① Выкуп</span><span>② Производство</span><span>③ Склад Китай</span><span>④ Проверка</span>
+        <span>⑤ Отправка</span><span>⑥ Таможня Минск</span><span>⑦ Склад Минск</span>
+      </div>
+
+      <div class="mt-3 space-y-4">
+        <!-- Машина MO-2026-014 -->
+        <div>
+          <div class="flex items-center justify-between text-sm">
+            <span class="font-semibold text-ink">MO-2026-014 <span class="ml-1 text-[12px] font-normal text-muted">· 18 заявок · ¥182 400 · ETA Минск 16 июня</span></span>
+            <span class="inline-flex items-center rounded-full bg-amber-50 dark:bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-700 dark:text-amber-300">Таможня Минск</span>
+          </div>
+          <div class="mt-2 flex items-center gap-1">
+            <div class="h-2 flex-1 rounded-full bg-emerald-500"></div>
+            <div class="h-2 flex-1 rounded-full bg-emerald-500"></div>
+            <div class="h-2 flex-1 rounded-full bg-emerald-500"></div>
+            <div class="h-2 flex-1 rounded-full bg-emerald-500"></div>
+            <div class="h-2 flex-1 rounded-full bg-emerald-500"></div>
+            <div class="h-2 flex-1 rounded-full bg-amber-400"></div>
+            <div class="h-2 flex-1 rounded-full bg-line"></div>
+          </div>
+        </div>
+        <!-- Машина MO-2026-015 -->
+        <div>
+          <div class="flex items-center justify-between text-sm">
+            <span class="font-semibold text-ink">MO-2026-015 <span class="ml-1 text-[12px] font-normal text-muted">· 22 заявки · ¥210 800 · ETA Минск 24 июня</span></span>
+            <span class="inline-flex items-center rounded-full bg-indigo-50 dark:bg-indigo-500/15 px-2 py-0.5 text-[11px] font-semibold text-indigo-600 dark:text-indigo-300">Проверка на складе (Китай)</span>
+          </div>
+          <div class="mt-2 flex items-center gap-1">
+            <div class="h-2 flex-1 rounded-full bg-emerald-500"></div>
+            <div class="h-2 flex-1 rounded-full bg-emerald-500"></div>
+            <div class="h-2 flex-1 rounded-full bg-emerald-500"></div>
+            <div class="h-2 flex-1 rounded-full bg-indigo-400"></div>
+            <div class="h-2 flex-1 rounded-full bg-line"></div>
+            <div class="h-2 flex-1 rounded-full bg-line"></div>
+            <div class="h-2 flex-1 rounded-full bg-line"></div>
+          </div>
+        </div>
+        <!-- Машина MO-2026-016 -->
+        <div>
+          <div class="flex items-center justify-between text-sm">
+            <span class="font-semibold text-ink">MO-2026-016 <span class="ml-1 text-[12px] font-normal text-muted">· 9 заявок · ¥74 100 · сбор открыт, ETA Минск 3 июля</span></span>
+            <span class="inline-flex items-center rounded-full bg-violet-50 dark:bg-violet-500/15 px-2 py-0.5 text-[11px] font-semibold text-violet-600 dark:text-violet-300">Выкуп / производство</span>
+          </div>
+          <div class="mt-2 flex items-center gap-1">
+            <div class="h-2 flex-1 rounded-full bg-emerald-500"></div>
+            <div class="h-2 flex-1 rounded-full bg-violet-400"></div>
+            <div class="h-2 flex-1 rounded-full bg-line"></div>
+            <div class="h-2 flex-1 rounded-full bg-line"></div>
+            <div class="h-2 flex-1 rounded-full bg-line"></div>
+            <div class="h-2 flex-1 rounded-full bg-line"></div>
+            <div class="h-2 flex-1 rounded-full bg-line"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Два столбца: запросы цены + проверка контрагентов -->
+    <div class="grid gap-4 lg:grid-cols-2">
+      <!-- Запросы цены ждут ответа -->
+      <section class="rounded-2xl bg-surface p-5 shadow-card">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div class="text-[11px] font-semibold uppercase tracking-wide text-faint">Запросы цены — нужен ответ продавцу</div>
+          <a href="zak-price-inquiry-preview.html" class="text-[12px] font-semibold text-accent hover:underline">Все →</a>
+        </div>
+        <div class="mt-3 divide-y divide-slate-100">
+          <div class="flex items-center justify-between gap-2 py-2.5">
+            <span class="min-w-0">
+              <span class="block truncate text-sm font-semibold text-ink">Конденсатор 470мкФ 25В (нет в наличии)</span>
+              <span class="block text-[12px] text-muted">Иванов П. · клиент «РадиоДеталь» · 5000 шт</span>
+            </span>
+            <span class="shrink-0 inline-flex items-center rounded-full bg-red-50 dark:bg-red-500/15 px-2 py-0.5 text-[11px] font-semibold text-red-600 dark:text-red-300">26ч без ответа</span>
+          </div>
+          <div class="flex items-center justify-between gap-2 py-2.5">
+            <span class="min-w-0">
+              <span class="block truncate text-sm font-semibold text-ink">Реле SRD-05VDC 10A</span>
+              <span class="block text-[12px] text-muted">Петрова А. · «ЭлектроМир» · 1200 шт</span>
+            </span>
+            <span class="shrink-0 inline-flex items-center rounded-full bg-emerald-50 dark:bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">цена пришла, можно отвечать</span>
+          </div>
+          <div class="flex items-center justify-between gap-2 py-2.5">
+            <span class="min-w-0">
+              <span class="block truncate text-sm font-semibold text-ink">Разъём USB-C 24pin SMD</span>
+              <span class="block text-[12px] text-muted">Сидоров К. · «ТехноПром» · 20000 шт</span>
+            </span>
+            <span class="shrink-0 inline-flex items-center rounded-full bg-amber-50 dark:bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-700 dark:text-amber-300">уточняем у 2 поставщиков</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Проверка контрагентов -->
+      <section class="rounded-2xl bg-surface p-5 shadow-card">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div class="text-[11px] font-semibold uppercase tracking-wide text-faint">Проверка контрагентов в Китае</div>
+          <a href="zak-price-monitor-preview.html" class="text-[12px] font-semibold text-accent hover:underline">Реестр →</a>
+        </div>
+        <div class="mt-3 space-y-2.5">
+          <div class="flex items-center gap-3 text-sm">
+            <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-xs font-bold text-emerald-700 dark:text-emerald-300">深</span>
+            <span class="min-w-0 flex-1">
+              <span class="block truncate font-semibold text-ink">Shenzhen Hangxin 深圳航芯</span>
+              <span class="block text-[12px] text-muted">企信宝: действующая · 8 лет · нет судов</span>
+            </span>
+            <span class="shrink-0 inline-flex items-center rounded-full bg-emerald-50 dark:bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">Надёжный</span>
+          </div>
+          <div class="flex items-center gap-3 text-sm">
+            <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-100 text-xs font-bold text-amber-700 dark:text-amber-300">YX</span>
+            <span class="min-w-0 flex-1">
+              <span class="block truncate font-semibold text-ink">Yuxin Electronics</span>
+              <span class="block text-[12px] text-muted">企信宝: 2 года · малый капитал · проверить</span>
+            </span>
+            <span class="shrink-0 inline-flex items-center rounded-full bg-amber-50 dark:bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-700 dark:text-amber-300">Осторожно</span>
+          </div>
+          <div class="flex items-center gap-3 text-sm">
+            <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-red-100 text-xs font-bold text-red-700 dark:text-red-300">!</span>
+            <span class="min-w-0 flex-1">
+              <span class="block truncate font-semibold text-ink">Новый поставщик (1688, без истории)</span>
+              <span class="block text-[12px] text-muted">企信宝: &lt;1 года · ИИ нашёл жалобы</span>
+            </span>
+            <span class="shrink-0 inline-flex items-center rounded-full bg-red-50 dark:bg-red-500/15 px-2 py-0.5 text-[11px] font-semibold text-red-600 dark:text-red-300">Риск</span>
+          </div>
+        </div>
+        <p class="mt-3 text-[12px] text-muted">ИИ собирает данные из 企信宝/天眼查, истории сделок и отзывов на 1688/Alibaba, выставляет рейтинг и поднимает риски до предоплаты.</p>
+      </section>
+    </div>
+
+    <!-- ИИ-инсайты (ghost) -->
+    <div class="rounded-2xl border border-dashed border-violet-300 dark:border-violet-500/40 bg-violet-50 dark:bg-violet-500/15 p-5">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <span class="flex items-center gap-2">
+          <span class="text-violet-500 dark:text-violet-300">✦</span>
+          <span class="text-[11px] font-semibold uppercase tracking-wide text-violet-600 dark:text-violet-300">ИИ-помощник закупщика · что сделать сегодня</span>
+        </span>
+        <span class="inline-flex items-center rounded-full bg-violet-50 dark:bg-violet-500/15 px-2 py-0.5 text-[11px] font-semibold text-violet-600 dark:text-violet-300">Итерация 1 · ИИ (позже)</span>
+      </div>
+      <div class="mt-3 space-y-2">
+        <div class="flex items-start justify-between gap-3"><span class="text-sm text-violet-700 dark:text-violet-300"><span class="font-semibold">1 ·</span> Цена по реле SRD-05VDC пришла (¥0.78) — ИИ подготовил ответ продавцу: цена + срок 22 дня. Проверить и отправить.</span><span class="shrink-0"><span class="inline-flex items-center rounded-full bg-violet-50 dark:bg-violet-500/15 px-2 py-0.5 text-[11px] font-semibold text-violet-600 dark:text-violet-300">ответ готов</span></span></div>
+        <div class="flex items-start justify-between gap-3"><span class="text-sm text-violet-700 dark:text-violet-300"><span class="font-semibold">2 ·</span> Чип STM32 на 1688 подорожал на 12% — есть аналог у Hangxin дешевле на 8%, переключить под закупку MO-016.</span><span class="shrink-0"><span class="inline-flex items-center rounded-full bg-violet-50 dark:bg-violet-500/15 px-2 py-0.5 text-[11px] font-semibold text-violet-600 dark:text-violet-300">−8% цена</span></span></div>
+        <div class="flex items-start justify-between gap-3"><span class="text-sm text-violet-700 dark:text-violet-300"><span class="font-semibold">3 ·</span> Машина MO-014 на таможне — подготовлен пакет документов (инвойс, упак.лист, ДТ). Проверить себестоимость до оприходования.</span><span class="shrink-0"><span class="inline-flex items-center rounded-full bg-violet-50 dark:bg-violet-500/15 px-2 py-0.5 text-[11px] font-semibold text-violet-600 dark:text-violet-300">+себестоимость</span></span></div>
+      </div>
+    </div>
+
+    <p class="text-xs text-faint">Превью-снимок для просмотра процесса. Демо-данные (BYN/CNY). Работает навигация по вкладкам и наведение на панель чатов справа.</p>
+  </div>
+</body>
+</html>
