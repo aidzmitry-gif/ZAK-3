@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Закупки · AI-переписка — превью</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: "class",
+      theme: { extend: {
+        colors: {
+          canvas: "rgb(var(--canvas) / <alpha-value>)",
+          surface: "rgb(var(--surface) / <alpha-value>)",
+          sunken: "rgb(var(--sunken) / <alpha-value>)",
+          ink: "rgb(var(--ink) / <alpha-value>)",
+          muted: "rgb(var(--muted) / <alpha-value>)",
+          faint: "rgb(var(--faint) / <alpha-value>)",
+          line: "rgb(var(--line) / <alpha-value>)",
+          "line-strong": "rgb(var(--line-strong) / <alpha-value>)",
+          accent: { DEFAULT: "rgb(var(--accent) / <alpha-value>)", ink: "rgb(var(--accent-ink) / <alpha-value>)", soft: "rgb(var(--accent-soft) / <alpha-value>)" },
+          money: { DEFAULT: "rgb(var(--money) / <alpha-value>)", soft: "rgb(var(--money-soft) / <alpha-value>)" },
+        },
+        fontFamily: { sans: ["Inter","system-ui","-apple-system","Segoe UI","Roboto","Arial","sans-serif"] },
+        boxShadow: {
+          card: "0 1px 1px rgba(20,20,40,0.03), 0 2px 4px rgba(20,20,40,0.04), 0 6px 16px rgba(20,20,40,0.04), inset 0 1px 0 rgba(255,255,255,0.6)",
+          pop: "0 1px 2px rgba(20,20,40,0.06), 0 12px 28px rgba(20,20,40,0.12)",
+        },
+        borderRadius: { lg: "10px", xl: "12px", "2xl": "14px" },
+      } },
+    };
+  </script>
+  <style>
+    :root{ --canvas:238 241 245; --surface:255 255 255; --sunken:244 246 249; --ink:15 23 42; --muted:91 107 130; --faint:147 161 181; --line:226 232 240; --line-strong:203 213 225; --accent:30 94 255; --accent-ink:21 69 204; --accent-soft:227 236 255; --money:14 124 74; --money-soft:226 243 234; }
+    .dark{ --canvas:14 17 22; --surface:23 27 34; --sunken:31 36 44; --ink:232 234 237; --muted:155 163 174; --faint:107 114 128; --line:42 48 56; --line-strong:58 66 76; --accent:110 139 255; --accent-ink:138 160 255; --accent-soft:35 42 61; --money:52 211 153; --money-soft:22 39 31; }
+    body{font-family:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;font-feature-settings:"cv05","ss01";-webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
+    /* ── Панель чатов поставщиков (рейка → раскрытие по hover, overlay) — эталон из cockpit ── */
+    .chatrail{position:fixed;top:0;right:0;height:100vh;width:68px;z-index:40;
+      background:rgb(var(--surface));border-left:1px solid rgb(var(--line));transition:width .22s ease;overflow:hidden;
+      box-shadow:-8px 0 24px rgba(20,20,40,.05)}
+    .chatrail:hover{width:320px;box-shadow:-12px 0 40px rgba(20,20,40,.14)}
+    .chatrail .lbl{opacity:0;transition:opacity .18s ease;white-space:nowrap}
+    .chatrail:hover .lbl{opacity:1}
+    .chatrail .head{display:flex;align-items:center;gap:.5rem;height:56px;padding:0 14px;border-bottom:1px solid rgb(var(--line))}
+    .chatrow{display:flex;align-items:center;gap:.6rem;padding:9px 14px;cursor:pointer}
+    .chatrow:hover{background:rgb(var(--sunken))}
+    .av{position:relative;flex:0 0 auto;width:40px;height:40px;border-radius:9999px;
+      display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:#fff}
+    .badge{position:absolute;top:-3px;right:-3px;min-width:18px;height:18px;padding:0 4px;border-radius:9999px;
+      background:#ef4444;color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;border:2px solid rgb(var(--surface))}
+        .ch-flag{font-size:10px;font-weight:700;padding:1px 6px;border-radius:9999px;line-height:1.4}
+    .theme-toggle{position:fixed;bottom:16px;left:16px;z-index:70;height:40px;padding:0 14px;border-radius:9999px;background:rgb(var(--surface));border:1px solid rgb(var(--line));box-shadow:0 2px 10px rgba(20,20,40,.14);display:flex;align-items:center;gap:7px;cursor:pointer;font-size:14px;font-weight:600;color:rgb(var(--ink))}
+    .theme-toggle:hover{border-color:rgb(var(--accent))}
+    .theme-lbl{font-size:13px}
+  </style>
+</head>
+<body class="bg-canvas text-ink">
+  <button class="theme-toggle" onclick="toggleTheme()" title="Светлая / тёмная тема" aria-label="Переключить тему"><span id="themeIcon">🌙</span><span class="theme-lbl">Тёмная</span></button>
+  <script>
+    function applyTheme(d){ document.documentElement.classList.toggle('dark', d); const i=document.getElementById('themeIcon'), l=document.querySelector('.theme-lbl'); if(i) i.textContent=d?'☀️':'🌙'; if(l) l.textContent=d?'Светлая':'Тёмная'; }
+    function toggleTheme(){ const d=!document.documentElement.classList.contains('dark'); applyTheme(d); try{localStorage.setItem('zak-theme', d?'dark':'light')}catch(e){} }
+    (function(){ const p=new URLSearchParams(location.search).get('theme'); let s; try{s=localStorage.getItem('zak-theme')}catch(e){} applyTheme(p ? p==='dark' : s==='dark'); })();
+  </script>
+  <!-- ⚠️ Статичный снимок будущего Next.js-экрана /crm/procurement (AI-переписка). Демо-данные. -->
+
+  <!-- ============ ПАНЕЛЬ ЧАТОВ ПОСТАВЩИКОВ (right rail) — дословно из эталона cockpit ============ -->
+  <aside class="chatrail">
+    <div class="head">
+      <span class="text-lg">💬</span>
+      <span class="lbl text-sm font-semibold text-ink">Переписка с поставщиками</span>
+    </div>
+    <div class="lbl px-3.5 py-2 text-[11px] text-violet-600 dark:text-violet-300 bg-violet-50/60 dark:bg-violet-500/15 border-b border-violet-100 dark:border-violet-500/40">
+      ✦ ИИ ведёт 7 диалогов · 3 черновика ответа ждут отправки
+    </div>
+    <div class="chatrow">
+      <span class="av" style="background:#0ea5e9">深<span class="badge">2</span></span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">Shenzhen Hangxin 深圳航芯</span>
+          <span class="ch-flag bg-emerald-50 dark:bg-emerald-500/15 text-emerald-600 dark:text-emerald-300">WeChat</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">价格已更新到 ¥3.85/шт · обновил цену по чипам</span>
+      </span>
+    </div>
+    <div class="chatrow">
+      <span class="av" style="background:#6366f1">YX<span class="badge">1</span></span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">Yuxin Electronics</span>
+          <span class="ch-flag bg-blue-50 dark:bg-blue-500/15 text-blue-600 dark:text-blue-300">email</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">PI attached, lead time 25 days</span>
+      </span>
+    </div>
+    <div class="chatrow">
+      <span class="av" style="background:#f59e0b">ИП<span class="badge">3</span></span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">Иванов П. · продавец</span>
+          <span class="ch-flag bg-amber-50 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300">внутр.</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">Клиент ждёт срок по партии конденсаторов</span>
+      </span>
+    </div>
+    <div class="chatrow">
+      <span class="av" style="background:#ef4444">阿</span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">阿里巴巴 商家 (1688)</span>
+          <span class="ch-flag bg-orange-50 dark:bg-orange-500/15 text-orange-600 dark:text-orange-300">1688</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">新报价: 50000шт @ ¥0.42</span>
+      </span>
+    </div>
+    <div class="chatrow">
+      <span class="av" style="background:#14b8a6">淘</span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">Taobao 店铺 · разъёмы</span>
+          <span class="ch-flag bg-rose-50 dark:bg-rose-500/15 text-rose-600 dark:text-rose-300">Taobao</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">现货充足 · в наличии, готов к отгрузке</span>
+      </span>
+    </div>
+    <div class="chatrow">
+      <span class="av" style="background:#8b5cf6">SZ</span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">Suzhou Precision</span>
+          <span class="ch-flag bg-blue-50 dark:bg-blue-500/15 text-blue-600 dark:text-blue-300">email</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">QC report ready, photos sent</span>
+      </span>
+    </div>
+    <div class="lbl px-3.5 py-2.5 mt-1 text-[11px] text-faint">
+      ИИ переводит, отвечает по шаблону и поднимает важное наверх. Канал, тон и история — в карточке диалога.
+    </div>
+  </aside>
+
+  <!-- ============ ОСНОВНОЙ КОНТЕНТ ============ -->
+  <div class="mx-auto max-w-[1180px] space-y-4 p-6 pr-[92px]">
+
+    <!-- Заголовок -->
+    <div>
+      <h1 class="text-xl font-bold text-ink">AI-переписка с поставщиками</h1>
+      <p class="mt-1 text-sm text-muted">
+        WeChat / email / 1688: ИИ переводит, отвечает по шаблону, ведёт переговоры по цене и сроку,
+        делает аналитику бесед и готовит документы для закупки и импорта. Закупщик подтверждает — ИИ исполняет.
+      </p>
+    </div>
+
+    <!-- Вкладки закупок (AI-переписка активна) -->
+    <div class="flex flex-wrap gap-1.5 text-[13px]">
+      <a href="zak-cockpit-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">Обзор</a>
+      <a href="zak-price-inquiry-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">Запросы цены</a>
+      <a href="zak-board-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">Воронка</a>
+      <a href="zak-shipment-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">Машины</a>
+      <span class="rounded-full bg-accent px-3 py-1.5 font-semibold text-white shadow-card">AI-переписка</span>
+      <a href="zak-price-monitor-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">Мониторинг цен</a>
+      <a href="zak-landed-cost-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">Себестоимость</a>
+    </div>
+
+    <!-- Метрики ИИ -->
+    <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div class="rounded-2xl bg-surface p-4 shadow-card">
+        <div class="text-[11px] font-semibold uppercase tracking-wide text-faint">Активных диалогов</div>
+        <div class="mt-1 text-2xl font-bold text-ink">7</div>
+        <div class="mt-1 text-[12px] text-muted">WeChat 4 · email 2 · 1688 1</div>
+      </div>
+      <div class="rounded-2xl bg-surface p-4 shadow-card">
+        <div class="text-[11px] font-semibold uppercase tracking-wide text-faint">Ответов за день</div>
+        <div class="mt-1 text-2xl font-bold text-violet-600 dark:text-violet-300">41</div>
+        <div class="mt-1 text-[12px] text-muted">авто-перевод + черновик</div>
+      </div>
+      <div class="rounded-2xl bg-surface p-4 shadow-card">
+        <div class="text-[11px] font-semibold uppercase tracking-wide text-faint">Черновиков на ревью</div>
+        <div class="mt-1 text-2xl font-bold text-amber-600 dark:text-amber-300">3</div>
+        <div class="mt-1 text-[12px] text-muted">ждут подтверждения закупщика</div>
+      </div>
+      <div class="rounded-2xl bg-surface p-4 shadow-card">
+        <div class="text-[11px] font-semibold uppercase tracking-wide text-faint">Договорённостей</div>
+        <div class="mt-1 text-2xl font-bold text-emerald-600 dark:text-emerald-300">12</div>
+        <div class="mt-1 text-[12px] text-muted">цена/срок/MOQ зафиксированы ИИ</div>
+      </div>
+    </div>
+
+    <!-- Главный макет: список диалогов + тред -->
+    <div class="grid gap-4 lg:grid-cols-[300px_1fr]">
+
+      <!-- Список диалогов -->
+      <section class="rounded-2xl bg-surface p-3 shadow-card">
+        <div class="px-1 pb-2 text-[11px] font-semibold uppercase tracking-wide text-faint">Диалоги</div>
+        <div class="space-y-1">
+          <!-- выбранный -->
+          <div class="rounded-xl p-2.5 ring-2 ring-brand/40 bg-accent-soft/30">
+            <div class="flex items-center gap-2">
+              <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-semibold text-white" style="background:#0ea5e9">深</span>
+              <span class="min-w-0 flex-1">
+                <span class="flex items-center justify-between gap-1">
+                  <span class="truncate text-[13px] font-semibold text-ink">Shenzhen Hangxin</span>
+                  <span class="ch-flag bg-emerald-50 dark:bg-emerald-500/15 text-emerald-600 dark:text-emerald-300">WeChat</span>
+                </span>
+                <span class="block truncate text-[12px] text-muted">价格已更新到 ¥3.85/шт</span>
+              </span>
+            </div>
+          </div>
+          <!-- остальные -->
+          <div class="rounded-xl p-2.5 hover:bg-sunken">
+            <div class="flex items-center gap-2">
+              <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-semibold text-white" style="background:#6366f1">YX</span>
+              <span class="min-w-0 flex-1">
+                <span class="flex items-center justify-between gap-1">
+                  <span class="truncate text-[13px] font-semibold text-ink">Yuxin Electronics</span>
+                  <span class="ch-flag bg-blue-50 dark:bg-blue-500/15 text-blue-600 dark:text-blue-300">email</span>
+                </span>
+                <span class="block truncate text-[12px] text-muted">PI attached, lead time 25 days</span>
+              </span>
+            </div>
+          </div>
+          <div class="rounded-xl p-2.5 hover:bg-sunken">
+            <div class="flex items-center gap-2">
+              <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-semibold text-white" style="background:#ef4444">阿</span>
+              <span class="min-w-0 flex-1">
+                <span class="flex items-center justify-between gap-1">
+                  <span class="truncate text-[13px] font-semibold text-ink">阿里巴巴 商家</span>
+                  <span class="ch-flag bg-orange-50 dark:bg-orange-500/15 text-orange-600 dark:text-orange-300">1688</span>
+                </span>
+                <span class="block truncate text-[12px] text-muted">新报价: 50000шт @ ¥0.42</span>
+              </span>
+            </div>
+          </div>
+          <div class="rounded-xl p-2.5 hover:bg-sunken">
+            <div class="flex items-center gap-2">
+              <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-semibold text-white" style="background:#14b8a6">淘</span>
+              <span class="min-w-0 flex-1">
+                <span class="flex items-center justify-between gap-1">
+                  <span class="truncate text-[13px] font-semibold text-ink">Taobao 店铺</span>
+                  <span class="ch-flag bg-rose-50 dark:bg-rose-500/15 text-rose-600 dark:text-rose-300">Taobao</span>
+                </span>
+                <span class="block truncate text-[12px] text-muted">现货充足 · в наличии</span>
+              </span>
+            </div>
+          </div>
+          <div class="rounded-xl p-2.5 hover:bg-sunken">
+            <div class="flex items-center gap-2">
+              <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-semibold text-white" style="background:#8b5cf6">SZ</span>
+              <span class="min-w-0 flex-1">
+                <span class="flex items-center justify-between gap-1">
+                  <span class="truncate text-[13px] font-semibold text-ink">Suzhou Precision</span>
+                  <span class="ch-flag bg-blue-50 dark:bg-blue-500/15 text-blue-600 dark:text-blue-300">email</span>
+                </span>
+                <span class="block truncate text-[12px] text-muted">QC report ready, photos sent</span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Тред выбранного диалога -->
+      <section class="rounded-2xl bg-surface p-5 shadow-card">
+        <!-- шапка треда -->
+        <div class="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-3">
+          <div class="flex items-center gap-2.5">
+            <span class="flex h-10 w-10 items-center justify-center rounded-full text-sm font-semibold text-white" style="background:#0ea5e9">深</span>
+            <div>
+              <div class="text-sm font-semibold text-ink">Shenzhen Hangxin 深圳航芯</div>
+              <div class="text-[12px] text-muted">WeChat · чипы STM32, конденсаторы · менеджер Li Wei</div>
+            </div>
+          </div>
+          <span class="inline-flex items-center rounded-full bg-emerald-50 dark:bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">企信宝: надёжный · 8 лет</span>
+        </div>
+
+        <!-- лента сообщений -->
+        <div class="mt-4 space-y-3">
+          <!-- входящее -->
+          <div class="flex flex-col items-start">
+            <div class="max-w-[80%] rounded-2xl rounded-tl-sm bg-sunken px-3.5 py-2 text-sm text-ink">你好，STM32F103C8T6 现在 ¥3.85 一个，5000 起订，交货期 25 天。</div>
+            <div class="mt-1 max-w-[80%] px-1 text-[12px] italic text-faint">↳ перевод ИИ: «Здравствуйте, STM32F103C8T6 сейчас ¥3.85 за шт, MOQ 5000, срок 25 дней.»</div>
+            <div class="mt-0.5 px-1 text-[10px] text-faint">Li Wei · 09:14</div>
+          </div>
+          <!-- исходящее -->
+          <div class="flex flex-col items-end">
+            <div class="max-w-[80%] rounded-2xl rounded-tr-sm bg-accent px-3.5 py-2 text-sm text-white">Нужно 8000 шт. Цена при таком объёме? И возможен срок 20 дней?</div>
+            <div class="mt-0.5 px-1 text-[10px] text-faint">ИИ (от лица закупщика) · 09:16</div>
+          </div>
+          <!-- входящее -->
+          <div class="flex flex-col items-start">
+            <div class="max-w-[80%] rounded-2xl rounded-tl-sm bg-sunken px-3.5 py-2 text-sm text-ink">8000 个可以 ¥3.70，但 20 天比较紧，最快 22 天。</div>
+            <div class="mt-1 max-w-[80%] px-1 text-[12px] italic text-faint">↳ перевод ИИ: «На 8000 шт можем ¥3.70, но 20 дней впритык — минимум 22 дня.»</div>
+            <div class="mt-0.5 px-1 text-[10px] text-faint">Li Wei · 09:21</div>
+          </div>
+
+          <!-- черновик ответа ИИ -->
+          <div class="rounded-2xl border border-dashed border-violet-300 dark:border-violet-500/40 bg-violet-50 dark:bg-violet-500/15 p-3.5">
+            <div class="flex items-center gap-2">
+              <span class="text-violet-500 dark:text-violet-300">✦</span>
+              <span class="text-[11px] font-semibold uppercase tracking-wide text-violet-600 dark:text-violet-300">Черновик ответа ИИ · на подтверждение</span>
+            </div>
+            <p class="mt-2 text-sm text-violet-800">Согласны на ¥3.70 × 8000 шт, срок 22 дня. Просим прислать PI и реквизиты для предоплаты 30%.</p>
+            <p class="mt-1 text-[12px] italic text-violet-500 dark:text-violet-300">同意 ¥3.70 × 8000 个，交货期 22 天。请发 PI 和 30% 预付款的账户信息。</p>
+            <div class="mt-2.5 flex gap-2">
+              <span class="inline-flex items-center rounded-lg bg-accent px-3 py-1.5 text-[12px] font-semibold text-white opacity-90">Отправить</span>
+              <span class="inline-flex items-center rounded-lg border border-line bg-surface px-3 py-1.5 text-[12px] font-semibold text-muted">Поправить</span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Аналитика беседы + документы -->
+    <div class="grid gap-4 lg:grid-cols-2">
+      <section class="rounded-2xl bg-surface p-5 shadow-card">
+        <div class="text-[11px] font-semibold uppercase tracking-wide text-faint">Аналитика беседы · ИИ извлёк</div>
+        <div class="mt-3 grid grid-cols-2 gap-2.5">
+          <div class="rounded-xl border border-line bg-sunken p-3">
+            <div class="text-[10px] font-semibold uppercase tracking-wide text-faint">Согласованная цена</div>
+            <div class="mt-1 text-base font-bold text-ink">¥3.70 / шт</div>
+          </div>
+          <div class="rounded-xl border border-line bg-sunken p-3">
+            <div class="text-[10px] font-semibold uppercase tracking-wide text-faint">Срок</div>
+            <div class="mt-1 text-base font-bold text-ink">22 дня</div>
+          </div>
+          <div class="rounded-xl border border-line bg-sunken p-3">
+            <div class="text-[10px] font-semibold uppercase tracking-wide text-faint">MOQ</div>
+            <div class="mt-1 text-base font-bold text-ink">5000 шт</div>
+          </div>
+          <div class="rounded-xl border border-line bg-sunken p-3">
+            <div class="text-[10px] font-semibold uppercase tracking-wide text-faint">Предоплата</div>
+            <div class="mt-1 text-base font-bold text-ink">30%</div>
+          </div>
+        </div>
+        <div class="mt-3 flex items-start justify-between gap-2 rounded-xl bg-amber-50 dark:bg-amber-500/15 px-3 py-2">
+          <span class="text-[12px] text-amber-700 dark:text-amber-300"><span class="font-semibold">Риск:</span> поставщик упомянул вероятный рост цен на сырьё в Q3 — зафиксировать цену в контракте.</span>
+          <span class="shrink-0 inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-700 dark:text-amber-300">риск</span>
+        </div>
+        <p class="mt-2 text-[12px] text-muted">Тон беседы: <span class="font-semibold text-emerald-600 dark:text-emerald-300">конструктивный</span>. ИИ зафиксировал договорённости в карточку поставщика и закупку.</p>
+      </section>
+
+      <section class="rounded-2xl bg-surface p-5 shadow-card">
+        <div class="text-[11px] font-semibold uppercase tracking-wide text-faint">Документы · ИИ сформировал</div>
+        <div class="mt-3 space-y-2">
+          <div class="flex items-center justify-between gap-2 rounded-xl border border-line p-3">
+            <span class="flex items-center gap-2 text-sm text-ink"><span>📄</span> Proforma Invoice (PI) · STM32 × 8000</span>
+            <span class="inline-flex items-center rounded-full bg-emerald-50 dark:bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">готово</span>
+          </div>
+          <div class="flex items-center justify-between gap-2 rounded-xl border border-line p-3">
+            <span class="flex items-center gap-2 text-sm text-ink"><span>📦</span> Упаковочный лист (packing list)</span>
+            <span class="inline-flex items-center rounded-full bg-emerald-50 dark:bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">готово</span>
+          </div>
+          <div class="flex items-center justify-between gap-2 rounded-xl border border-line p-3">
+            <span class="flex items-center gap-2 text-sm text-ink"><span>📝</span> Контракт (с фиксацией цены)</span>
+            <span class="inline-flex items-center rounded-full bg-amber-50 dark:bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-700 dark:text-amber-300">на проверке</span>
+          </div>
+          <div class="flex items-center justify-between gap-2 rounded-xl border border-line p-3">
+            <span class="flex items-center gap-2 text-sm text-ink"><span>🛃</span> Пакет для импорта (инвойс+ДТ)</span>
+            <span class="inline-flex items-center rounded-full bg-sunken px-2 py-0.5 text-[11px] font-semibold text-muted">после отгрузки</span>
+          </div>
+        </div>
+        <p class="mt-3 text-[12px] text-muted">Документы заполняются по реквизитам поставщика и шаблонам компании; закупщик проверяет и подписывает.</p>
+      </section>
+    </div>
+
+    <!-- ИИ-блок -->
+    <div class="rounded-2xl border border-dashed border-violet-300 dark:border-violet-500/40 bg-violet-50 dark:bg-violet-500/15 p-5">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <span class="flex items-center gap-2">
+          <span class="text-violet-500 dark:text-violet-300">✦</span>
+          <span class="text-[11px] font-semibold uppercase tracking-wide text-violet-600 dark:text-violet-300">ИИ-агент переписки · что делает сам</span>
+        </span>
+        <span class="inline-flex items-center rounded-full bg-violet-50 dark:bg-violet-500/15 px-2 py-0.5 text-[11px] font-semibold text-violet-600 dark:text-violet-300">Итерация 1 · ИИ (позже)</span>
+      </div>
+      <div class="mt-3 space-y-2">
+        <div class="flex items-start justify-between gap-3"><span class="text-sm text-violet-700 dark:text-violet-300"><span class="font-semibold">1 ·</span> Переводит входящие WeChat/email (кит ↔ рус) и поднимает наверх диалоги, где ждут ответа или меняется цена.</span><span class="shrink-0"><span class="inline-flex items-center rounded-full bg-violet-50 dark:bg-violet-500/15 px-2 py-0.5 text-[11px] font-semibold text-violet-600 dark:text-violet-300">перевод</span></span></div>
+        <div class="flex items-start justify-between gap-3"><span class="text-sm text-violet-700 dark:text-violet-300"><span class="font-semibold">2 ·</span> Ведёт типовые переговоры по цене/сроку/MOQ по правилам закупщика, готовит черновик — отправка по подтверждению.</span><span class="shrink-0"><span class="inline-flex items-center rounded-full bg-violet-50 dark:bg-violet-500/15 px-2 py-0.5 text-[11px] font-semibold text-violet-600 dark:text-violet-300">переговоры</span></span></div>
+        <div class="flex items-start justify-between gap-3"><span class="text-sm text-violet-700 dark:text-violet-300"><span class="font-semibold">3 ·</span> Извлекает договорённости в карточку поставщика/закупку и формирует PI, упак.лист, контракт, пакет для импорта.</span><span class="shrink-0"><span class="inline-flex items-center rounded-full bg-violet-50 dark:bg-violet-500/15 px-2 py-0.5 text-[11px] font-semibold text-violet-600 dark:text-violet-300">документы</span></span></div>
+      </div>
+    </div>
+
+    <p class="text-xs text-faint">Превью-снимок. Демо-данные (BYN/¥). Работает навигация по вкладкам и наведение на панель чатов справа.</p>
+  </div>
+</body>
+</html>
