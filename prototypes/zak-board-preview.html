@@ -1,0 +1,915 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Закупки · Воронка закупок — превью</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    // Утверждённый дизайн (frontend/DESIGN.md, 2026-06-17): токены C+D, Inter, мягкие тени, акцент/деньги.
+    tailwind.config = {
+      darkMode: "class",
+      theme: { extend: {
+        colors: {
+          canvas: "rgb(var(--canvas) / <alpha-value>)",
+          surface: "rgb(var(--surface) / <alpha-value>)",
+          sunken: "rgb(var(--sunken) / <alpha-value>)",
+          ink: "rgb(var(--ink) / <alpha-value>)",
+          muted: "rgb(var(--muted) / <alpha-value>)",
+          faint: "rgb(var(--faint) / <alpha-value>)",
+          line: "rgb(var(--line) / <alpha-value>)",
+          "line-strong": "rgb(var(--line-strong) / <alpha-value>)",
+          accent: { DEFAULT: "rgb(var(--accent) / <alpha-value>)", ink: "rgb(var(--accent-ink) / <alpha-value>)", soft: "rgb(var(--accent-soft) / <alpha-value>)" },
+          money: { DEFAULT: "rgb(var(--money) / <alpha-value>)", soft: "rgb(var(--money-soft) / <alpha-value>)" },
+        },
+        fontFamily: { sans: ["Inter","system-ui","-apple-system","Segoe UI","Roboto","Arial","sans-serif"] },
+        boxShadow: {
+          card: "0 1px 1px rgba(20,20,40,0.03), 0 2px 4px rgba(20,20,40,0.04), 0 6px 16px rgba(20,20,40,0.04), inset 0 1px 0 rgba(255,255,255,0.6)",
+          pop: "0 1px 2px rgba(20,20,40,0.06), 0 12px 28px rgba(20,20,40,0.12)",
+        },
+        borderRadius: { lg: "10px", xl: "12px", "2xl": "14px" },
+      } },
+    };
+  </script>
+  <style>
+    /* Токены тем C (светлая, по умолчанию) и D (тёмная, .dark на <html>) — из frontend/globals.css. */
+    :root{ --canvas:238 241 245; --surface:255 255 255; --sunken:244 246 249; --ink:15 23 42; --muted:91 107 130; --faint:147 161 181; --line:226 232 240; --line-strong:203 213 225; --accent:30 94 255; --accent-ink:21 69 204; --accent-soft:227 236 255; --money:14 124 74; --money-soft:226 243 234; }
+    .dark{ --canvas:14 17 22; --surface:23 27 34; --sunken:31 36 44; --ink:232 234 237; --muted:155 163 174; --faint:107 114 128; --line:42 48 56; --line-strong:58 66 76; --accent:110 139 255; --accent-ink:138 160 255; --accent-soft:35 42 61; --money:52 211 153; --money-soft:22 39 31; }
+    body{font-family:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;font-feature-settings:"cv05","ss01";-webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
+    /* ── Панель чатов поставщиков (рейка → раскрытие по hover) — адаптируется к теме ── */
+    .chatrail{position:fixed;top:0;right:0;height:100vh;width:68px;z-index:30;
+      background:rgb(var(--surface));border-left:1px solid rgb(var(--line));transition:width .22s ease;overflow:hidden;
+      box-shadow:-8px 0 24px rgba(20,20,40,.05)}
+    .chatrail:hover{width:320px;box-shadow:-12px 0 40px rgba(20,20,40,.14)}
+    .chatrail .lbl{opacity:0;transition:opacity .18s ease;white-space:nowrap}
+    .chatrail:hover .lbl{opacity:1}
+    .chatrail .head{display:flex;align-items:center;gap:.5rem;height:56px;padding:0 14px;border-bottom:1px solid rgb(var(--line))}
+    .chatrow{display:flex;align-items:center;gap:.6rem;padding:9px 14px;cursor:pointer}
+    .chatrow:hover{background:rgb(var(--sunken))}
+    .av{position:relative;flex:0 0 auto;width:40px;height:40px;border-radius:9999px;
+      display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:#fff}
+    .badge{position:absolute;top:-3px;right:-3px;min-width:18px;height:18px;padding:0 4px;border-radius:9999px;
+      background:#ef4444;color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;border:2px solid rgb(var(--surface))}
+    .ch-flag{font-size:10px;font-weight:700;padding:1px 6px;border-radius:9999px;line-height:1.4}
+    /* ── Слайд-овер карточки заявки (как в CRM: клик / двойной клик по карточке) ── */
+    .ovl{position:fixed;inset:0;background:rgba(8,10,16,.50);opacity:0;pointer-events:none;transition:opacity .2s;z-index:50}
+    .ovl.show{opacity:1;pointer-events:auto}
+    .drw{position:fixed;top:0;right:0;height:100vh;width:560px;max-width:96vw;background:rgb(var(--surface));
+      box-shadow:-12px 0 40px rgba(8,10,16,.30);transform:translateX(100%);transition:transform .26s cubic-bezier(.4,0,.2,1);
+      z-index:60;display:flex;flex-direction:column}
+    .drw.show{transform:translateX(0)}
+    /* компактное превью (один клик) — узкий слайд-овер */
+    .drw2{position:fixed;top:0;right:0;height:100vh;width:380px;max-width:92vw;background:rgb(var(--surface));
+      box-shadow:-12px 0 40px rgba(8,10,16,.30);transform:translateX(100%);transition:transform .26s cubic-bezier(.4,0,.2,1);
+      z-index:60;display:flex;flex-direction:column}
+    .drw2.show{transform:translateX(0)}
+    .card{cursor:pointer}
+    .card:hover{box-shadow:0 12px 28px rgba(20,20,40,.12)}
+    .card:active{transform:scale(.995)}
+    /* переключатель поставщиков в переписке */
+    .zth-pill{font-size:11px;font-weight:600;padding:4px 9px;border-radius:9999px;border:1px solid rgb(var(--line));background:rgb(var(--surface));color:rgb(var(--muted));cursor:pointer}
+    .zth-pill.zth-on{background:rgb(var(--accent));color:#fff;border-color:rgb(var(--accent))}
+    /* тоггл светлая/тёмная */
+    .theme-toggle{position:fixed;bottom:16px;left:16px;z-index:70;height:40px;padding:0 14px;border-radius:9999px;
+      background:rgb(var(--surface));border:1px solid rgb(var(--line));box-shadow:0 2px 10px rgba(20,20,40,.14);
+      display:flex;align-items:center;gap:7px;cursor:pointer;font-size:14px;font-weight:600;color:rgb(var(--ink))}
+    .theme-toggle:hover{border-color:rgb(var(--accent))}
+    .theme-lbl{font-size:13px}
+  </style>
+</head>
+<body class="bg-canvas text-ink">
+  <!-- тоггл светлая/тёмная тема (утв. дизайн C+D) -->
+  <button class="theme-toggle" onclick="toggleTheme()" title="Светлая / тёмная тема" aria-label="Переключить тему"><span id="themeIcon">🌙</span><span class="theme-lbl">Тёмная</span></button>
+  <script>
+    function applyTheme(d){ document.documentElement.classList.toggle('dark', d); const i=document.getElementById('themeIcon'), l=document.querySelector('.theme-lbl'); if(i) i.textContent=d?'☀️':'🌙'; if(l) l.textContent=d?'Светлая':'Тёмная'; }
+    function toggleTheme(){ const d=!document.documentElement.classList.contains('dark'); applyTheme(d); try{localStorage.setItem('zak-theme', d?'dark':'light')}catch(e){} }
+    (function(){ const p=new URLSearchParams(location.search).get('theme'); let s; try{s=localStorage.getItem('zak-theme')}catch(e){} applyTheme(p ? p==='dark' : s==='dark'); })();
+  </script>
+  <!-- ⚠️ Статичный снимок будущего Next.js-экрана /crm/procurement/board. 9 стадий из stages.py.
+       План/факт целей отдела + карточка заявки по клику (как сделка в CRM). Демо-данные, BYN/¥. -->
+
+  <!-- ============ ПАНЕЛЬ ЧАТОВ ПОСТАВЩИКОВ (right rail) ============ -->
+  <aside class="chatrail">
+    <div class="head">
+      <span class="text-lg">💬</span>
+      <span class="lbl text-sm font-semibold text-ink">Переписка с поставщиками</span>
+    </div>
+    <div class="lbl px-3.5 py-2 text-[11px] text-violet-600 dark:text-violet-300 bg-violet-50/60 dark:bg-violet-500/15 border-b border-violet-100 dark:border-violet-500/40">
+      ✦ ИИ ведёт 7 диалогов · 3 черновика ответа ждут отправки
+    </div>
+    <div class="chatrow">
+      <span class="av" style="background:#0ea5e9">深<span class="badge">2</span></span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">Shenzhen Hangxin 深圳航芯</span>
+          <span class="ch-flag bg-emerald-50 dark:bg-emerald-500/15 text-emerald-600 dark:text-emerald-300">WeChat</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">价格已更新到 ¥3.85/шт · обновил цену по чипам</span>
+      </span>
+    </div>
+    <div class="chatrow">
+      <span class="av" style="background:#6366f1">YX<span class="badge">1</span></span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">Yuxin Electronics</span>
+          <span class="ch-flag bg-blue-50 dark:bg-blue-500/15 text-blue-600 dark:text-blue-300">email</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">PI attached, lead time 25 days</span>
+      </span>
+    </div>
+    <div class="chatrow">
+      <span class="av" style="background:#f59e0b">ИП<span class="badge">3</span></span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">Иванов П. · продавец</span>
+          <span class="ch-flag bg-amber-50 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300">внутр.</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">Клиент ждёт срок по партии конденсаторов</span>
+      </span>
+    </div>
+    <div class="chatrow">
+      <span class="av" style="background:#ef4444">阿</span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">阿里巴巴 商家 (1688)</span>
+          <span class="ch-flag bg-orange-50 dark:bg-orange-500/15 text-orange-600 dark:text-orange-300">1688</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">新报价: 50000шт @ ¥0.42</span>
+      </span>
+    </div>
+    <div class="chatrow">
+      <span class="av" style="background:#14b8a6">淘</span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">Taobao 店铺 · разъёмы</span>
+          <span class="ch-flag bg-rose-50 dark:bg-rose-500/15 text-rose-600 dark:text-rose-300">Taobao</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">现货充足 · в наличии, готов к отгрузке</span>
+      </span>
+    </div>
+    <div class="chatrow">
+      <span class="av" style="background:#8b5cf6">SZ</span>
+      <span class="lbl min-w-0">
+        <span class="flex items-center gap-1.5">
+          <span class="truncate text-[13px] font-semibold text-ink">Suzhou Precision</span>
+          <span class="ch-flag bg-blue-50 dark:bg-blue-500/15 text-blue-600 dark:text-blue-300">email</span>
+        </span>
+        <span class="block truncate text-[12px] text-muted">QC report ready, photos sent</span>
+      </span>
+    </div>
+    <div class="lbl px-3.5 py-2.5 mt-1 text-[11px] text-faint">
+      ИИ переводит, отвечает по шаблону и поднимает важное наверх. Канал, тон и история — в карточке диалога.
+    </div>
+  </aside>
+
+  <!-- ============ ОСНОВНОЙ КОНТЕНТ ============ -->
+  <div class="mx-auto max-w-[1180px] space-y-4 p-6 pr-[92px]">
+
+    <!-- Заголовок -->
+    <div>
+      <h1 class="text-xl font-bold text-ink">Закупки · воронка</h1>
+      <p class="mt-1 text-sm text-muted">
+        Канбан 9 стадий: от потребности до оприходования. Заявки под конкретные сделки и пополнение склада в одном потоке.
+        Двойной клик по карточке — полная карточка заявки (как сделка в CRM).
+      </p>
+    </div>
+
+    <!-- Вкладки закупок (Воронка активна) -->
+    <div class="flex flex-wrap gap-1.5 text-[13px]">
+      <a href="zak-cockpit-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">Обзор</a>
+      <a href="zak-price-inquiry-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">Запросы цены</a>
+      <span class="rounded-full bg-accent px-3 py-1.5 font-semibold text-white shadow-card">Воронка</span>
+      <a href="zak-shipment-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">Машины</a>
+      <a href="zak-ai-comms-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">AI-переписка</a>
+      <a href="zak-price-monitor-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">Мониторинг цен</a>
+      <a href="zak-landed-cost-preview.html" class="rounded-full bg-surface px-3 py-1.5 font-medium text-muted shadow-card hover:text-accent">Себестоимость</a>
+    </div>
+
+    <!-- ════ ПЛАН / ФАКТ — цели отдела закупок (как в продажах) ════ -->
+    <section class="rounded-2xl bg-surface p-5 shadow-card">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div class="flex items-center gap-2">
+          <span class="text-[11px] font-semibold uppercase tracking-wide text-faint">Цели отдела закупок · план / факт</span>
+          <span class="inline-flex items-center rounded-full bg-sunken px-2 py-0.5 text-[11px] font-semibold text-muted">июнь · день 12 из 30</span>
+        </div>
+        <span class="inline-flex items-center rounded-full bg-violet-50 dark:bg-violet-500/15 px-2 py-0.5 text-[11px] font-semibold text-violet-600 dark:text-violet-300">demo · BYN</span>
+      </div>
+
+      <div class="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        <!-- 1 · Экономия (↓ себестоимость) -->
+        <div class="rounded-xl border border-line bg-sunken p-3">
+          <div class="flex items-center justify-between">
+            <span class="text-[10px] font-semibold uppercase tracking-wide text-faint">Экономия закупок</span>
+            <span class="inline-flex items-center rounded-full bg-accent-soft px-1.5 py-0.5 text-[9px] font-semibold text-accent">↓ себест.</span>
+          </div>
+          <div class="mt-1 text-lg font-bold text-ink">18 400 <span class="text-[12px] font-medium text-muted">/ 30 000</span></div>
+          <div class="mt-2 h-2 w-full overflow-hidden rounded-full bg-line"><div class="h-full rounded-full bg-amber-500" style="width:61%"></div></div>
+          <div class="mt-1 text-[11px] text-muted">61% плана · торг + объём + аналоги</div>
+        </div>
+        <!-- 2 · Снижение себестоимости -->
+        <div class="rounded-xl border border-line bg-sunken p-3">
+          <div class="flex items-center justify-between">
+            <span class="text-[10px] font-semibold uppercase tracking-wide text-faint">Себестоимость (landed)</span>
+            <span class="inline-flex items-center rounded-full bg-accent-soft px-1.5 py-0.5 text-[9px] font-semibold text-accent">↓ себест.</span>
+          </div>
+          <div class="mt-1 text-lg font-bold text-emerald-600 dark:text-emerald-300">−7.2% <span class="text-[12px] font-medium text-muted">/ −10%</span></div>
+          <div class="mt-2 h-2 w-full overflow-hidden rounded-full bg-line"><div class="h-full rounded-full bg-emerald-500" style="width:72%"></div></div>
+          <div class="mt-1 text-[11px] text-muted">к прошл. кварталу · цель −10%</div>
+        </div>
+        <!-- 3 · SLA ответа продавцу (автоматизация) -->
+        <div class="rounded-xl border border-line bg-sunken p-3">
+          <div class="flex items-center justify-between">
+            <span class="text-[10px] font-semibold uppercase tracking-wide text-faint">Запросы цены в SLA</span>
+            <span class="inline-flex items-center rounded-full bg-violet-100 px-1.5 py-0.5 text-[9px] font-semibold text-violet-600 dark:text-violet-300">авто · ИИ</span>
+          </div>
+          <div class="mt-1 text-lg font-bold text-ink">17 <span class="text-[12px] font-medium text-muted">/ 22</span></div>
+          <div class="mt-2 h-2 w-full overflow-hidden rounded-full bg-line"><div class="h-full rounded-full bg-amber-500" style="width:77%"></div></div>
+          <div class="mt-1 text-[11px] text-muted">ответ продавцу ≤24ч · 3 просрочены</div>
+        </div>
+        <!-- 4 · Качество приёмки (↑ качество) -->
+        <div class="rounded-xl border border-line bg-sunken p-3">
+          <div class="flex items-center justify-between">
+            <span class="text-[10px] font-semibold uppercase tracking-wide text-faint">Качество приёмки</span>
+            <span class="inline-flex items-center rounded-full bg-emerald-100 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-700 dark:text-emerald-300">↑ качество</span>
+          </div>
+          <div class="mt-1 text-lg font-bold text-amber-600 dark:text-amber-300">96.5% <span class="text-[12px] font-medium text-muted">/ 98%</span></div>
+          <div class="mt-2 h-2 w-full overflow-hidden rounded-full bg-line"><div class="h-full rounded-full bg-amber-500" style="width:88%"></div></div>
+          <div class="mt-1 text-[11px] text-muted">приёмка без брака · 2 претензии</div>
+        </div>
+        <!-- 5 · OTD машин (надёжность) -->
+        <div class="rounded-xl border border-line bg-sunken p-3">
+          <div class="flex items-center justify-between">
+            <span class="text-[10px] font-semibold uppercase tracking-wide text-faint">Машины в срок (OTD)</span>
+            <span class="inline-flex items-center rounded-full bg-emerald-100 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-700 dark:text-emerald-300">отношения</span>
+          </div>
+          <div class="mt-1 text-lg font-bold text-ink">4 <span class="text-[12px] font-medium text-muted">/ 5</span></div>
+          <div class="mt-2 h-2 w-full overflow-hidden rounded-full bg-line"><div class="h-full rounded-full bg-emerald-500" style="width:80%"></div></div>
+          <div class="mt-1 text-[11px] text-muted">доставка в график · 1 риск</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Фильтр + сводка -->
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <div class="flex flex-wrap gap-1.5 text-[12px]">
+        <span class="rounded-full bg-accent px-3 py-1 font-semibold text-white shadow-card">Все · 23</span>
+        <span class="rounded-full bg-surface px-3 py-1 font-medium text-muted shadow-card">Под сделки · 14</span>
+        <span class="rounded-full bg-surface px-3 py-1 font-medium text-muted shadow-card">Пополнение · 9</span>
+        <span class="rounded-full bg-surface px-3 py-1 font-medium text-amber-600 dark:text-amber-300 shadow-card">Заморожены · 2</span>
+      </div>
+      <div class="relative">
+        <input type="text" placeholder="Поиск заявки, товара, поставщика…" class="w-64 rounded-full border border-line bg-surface px-4 py-1.5 text-[12px] text-muted shadow-card" />
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ============ КАНБАН-ДОСКА (горизонтальный скролл) ============ -->
+  <div class="overflow-x-auto px-6 pb-4 pr-[92px]">
+    <div class="flex gap-3" style="width:max-content">
+
+      <!-- ── Колонка 1: Потребность (#3B82F6) ── -->
+      <div class="w-52 flex-shrink-0">
+        <div class="flex items-center gap-2 mb-2.5">
+          <span class="w-2.5 h-2.5 rounded-full flex-shrink-0" style="background:#3B82F6"></span>
+          <span class="text-[12px] font-semibold text-ink">Потребность</span>
+          <span class="ml-auto text-[10px] text-faint font-medium">2 · BYN 4 040</span>
+        </div>
+        <div class="space-y-2">
+          <div class="card rounded-xl bg-surface p-3 shadow-card hover:ring-1 hover:ring-blue-200 dark:ring-blue-500/40" data-z="cap470" title="Двойной клик — открыть карточку">
+            <div class="text-[12px] font-semibold text-ink leading-tight">Конденсатор 470мкФ 25В</div>
+            <div class="mt-1 text-[11px] text-muted">5 000 шт · BYN ~2 600</div>
+            <div class="mt-1.5 flex flex-wrap gap-1"><span class="rounded-full bg-blue-50 dark:bg-blue-500/15 px-2 py-0.5 text-[10px] font-semibold text-blue-600 dark:text-blue-300">под сделку СД-2287</span></div>
+            <div class="mt-1 text-[10px] text-faint">Иванов П. · ZPR-2026-041</div>
+          </div>
+          <div class="card rounded-xl bg-surface p-3 shadow-card hover:ring-1 hover:ring-blue-200 dark:ring-blue-500/40" data-z="esp32" title="Двойной клик — открыть карточку">
+            <div class="text-[12px] font-semibold text-ink leading-tight">Чип ESP32-C3-WROOM-02</div>
+            <div class="mt-1 text-[11px] text-muted">1 000 шт · BYN ~1 440</div>
+            <div class="mt-1.5 flex flex-wrap gap-1"><span class="rounded-full bg-sunken px-2 py-0.5 text-[10px] font-semibold text-muted">пополнение</span></div>
+            <div class="mt-1 text-[10px] text-faint">автозаявка · мин. остаток</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Колонка 2: Поиск поставщиков (#8B5CF6) ── -->
+      <div class="w-52 flex-shrink-0">
+        <div class="flex items-center gap-2 mb-2.5">
+          <span class="w-2.5 h-2.5 rounded-full flex-shrink-0" style="background:#8B5CF6"></span>
+          <span class="text-[12px] font-semibold text-ink">Поиск поставщиков</span>
+          <span class="ml-auto text-[10px] text-faint font-medium">3 · BYN 8 240</span>
+        </div>
+        <div class="space-y-2">
+          <div class="card rounded-xl bg-surface p-3 shadow-card hover:ring-1 hover:ring-violet-200 dark:ring-violet-500/40" data-z="relay_srd" title="Двойной клик — открыть карточку">
+            <div class="text-[12px] font-semibold text-ink leading-tight">Реле SRD-05VDC 10A</div>
+            <div class="mt-1 text-[11px] text-muted">1 200 шт · BYN ~1 440</div>
+            <div class="mt-1.5 flex flex-wrap gap-1"><span class="rounded-full bg-blue-50 dark:bg-blue-500/15 px-2 py-0.5 text-[10px] font-semibold text-blue-600 dark:text-blue-300">под сделку СД-2290</span></div>
+            <div class="mt-1 text-[10px] text-faint">Петрова А. · ZPR-2026-042</div>
+          </div>
+          <div class="card rounded-xl bg-surface p-3 shadow-card hover:ring-1 hover:ring-violet-200 dark:ring-violet-500/40" data-z="usbc" title="Двойной клик — открыть карточку">
+            <div class="text-[12px] font-semibold text-ink leading-tight">Разъём USB-C 24pin SMD</div>
+            <div class="mt-1 text-[11px] text-muted">20 000 шт · BYN ~4 800</div>
+            <div class="mt-1.5 flex flex-wrap gap-1"><span class="rounded-full bg-blue-50 dark:bg-blue-500/15 px-2 py-0.5 text-[10px] font-semibold text-blue-600 dark:text-blue-300">под сделку СД-2291</span></div>
+            <div class="mt-1 text-[10px] text-faint">Сидоров К. · ZPR-2026-043</div>
+          </div>
+          <div class="card rounded-xl bg-surface p-3 shadow-card hover:ring-1 hover:ring-violet-200 dark:ring-violet-500/40" data-z="res10k" title="Двойной клик — открыть карточку">
+            <div class="text-[12px] font-semibold text-ink leading-tight">Резистор 10кОм 1% 0.25W</div>
+            <div class="mt-1 text-[11px] text-muted">100 000 шт · BYN ~2 000</div>
+            <div class="mt-1.5 flex flex-wrap gap-1"><span class="rounded-full bg-sunken px-2 py-0.5 text-[10px] font-semibold text-muted">пополнение</span></div>
+            <div class="mt-1 text-[10px] text-faint">автозаявка · Ковалёв А.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Колонка 3: Переговоры (#F59E0B) ── -->
+      <div class="w-52 flex-shrink-0">
+        <div class="flex items-center gap-2 mb-2.5">
+          <span class="w-2.5 h-2.5 rounded-full flex-shrink-0" style="background:#F59E0B"></span>
+          <span class="text-[12px] font-semibold text-ink">Переговоры</span>
+          <span class="ml-auto text-[10px] text-faint font-medium">2 · ¥38 000</span>
+        </div>
+        <div class="space-y-2">
+          <div class="card rounded-xl bg-surface p-3 shadow-card hover:ring-1 hover:ring-amber-200 dark:ring-amber-500/40" data-z="cap100" title="Двойной клик — открыть карточку">
+            <div class="text-[12px] font-semibold text-ink leading-tight">Конденсатор 100мкФ 16В</div>
+            <div class="mt-1 text-[11px] text-muted">10 000 шт · Yuxin ¥0.12</div>
+            <div class="mt-1.5 flex flex-wrap gap-1"><span class="rounded-full bg-blue-50 dark:bg-blue-500/15 px-2 py-0.5 text-[10px] font-semibold text-blue-600 dark:text-blue-300">под сделку СД-2288</span></div>
+            <div class="mt-1 text-[10px] text-faint">ведёт ИИ · WeChat</div>
+          </div>
+          <div class="card rounded-xl bg-surface p-3 shadow-card hover:ring-1 hover:ring-amber-200 dark:ring-amber-500/40" data-z="diode" title="Двойной клик — открыть карточку">
+            <div class="text-[12px] font-semibold text-ink leading-tight">Диод 1N4007</div>
+            <div class="mt-1 text-[11px] text-muted">50 000 шт · Hangxin ¥0.06</div>
+            <div class="mt-1.5 flex flex-wrap gap-1"><span class="rounded-full bg-sunken px-2 py-0.5 text-[10px] font-semibold text-muted">пополнение</span></div>
+            <div class="mt-1 text-[10px] text-faint">ведёт ИИ · просит скидку 5%</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Колонка 4: Анализ поставщика (#06B6D4) ── -->
+      <div class="w-52 flex-shrink-0">
+        <div class="flex items-center gap-2 mb-2.5">
+          <span class="w-2.5 h-2.5 rounded-full flex-shrink-0" style="background:#06B6D4"></span>
+          <span class="text-[12px] font-semibold text-ink">Анализ поставщика</span>
+          <span class="ml-auto text-[10px] text-faint font-medium">2</span>
+        </div>
+        <div class="space-y-2">
+          <div class="card rounded-xl bg-surface p-3 shadow-card hover:ring-1 hover:ring-cyan-200 dark:ring-cyan-500/40" data-z="bc547" title="Двойной клик — открыть карточку">
+            <div class="text-[12px] font-semibold text-ink leading-tight">Транзистор BC547</div>
+            <div class="mt-1 text-[11px] text-muted">5 000 шт · Suzhou Precision</div>
+            <div class="mt-1.5 flex flex-wrap gap-1"><span class="rounded-full bg-blue-50 dark:bg-blue-500/15 px-2 py-0.5 text-[10px] font-semibold text-blue-600 dark:text-blue-300">под сделку СД-2285</span></div>
+            <div class="mt-1 text-[10px] text-faint">企信宝 проверка · ИИ</div>
+          </div>
+          <div class="card rounded-xl bg-surface p-3 shadow-card hover:ring-1 hover:ring-cyan-200 dark:ring-cyan-500/40" data-z="choke" title="Двойной клик — открыть карточку">
+            <div class="text-[12px] font-semibold text-ink leading-tight">Дроссель 100мкГн SMD</div>
+            <div class="mt-1 text-[11px] text-muted">2 000 шт · Suzhou Precision</div>
+            <div class="mt-1.5 flex flex-wrap gap-1"><span class="rounded-full bg-sunken px-2 py-0.5 text-[10px] font-semibold text-muted">пополнение</span></div>
+            <div class="mt-1 text-[10px] text-faint">сравнение: 2 поставщика</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Колонка 5: Согласование (#EC4899) ── -->
+      <div class="w-52 flex-shrink-0">
+        <div class="flex items-center gap-2 mb-2.5">
+          <span class="w-2.5 h-2.5 rounded-full flex-shrink-0" style="background:#EC4899"></span>
+          <span class="text-[12px] font-semibold text-ink">Согласование</span>
+          <span class="ml-auto text-[10px] text-faint font-medium">1 · BYN 2 400</span>
+        </div>
+        <div class="space-y-2">
+          <div class="card rounded-xl bg-surface p-3 shadow-card hover:ring-1 hover:ring-pink-200 dark:ring-pink-500/40 ring-1 ring-amber-300 dark:ring-amber-500/40" data-z="esp8266" title="Двойной клик — открыть карточку">
+            <div class="text-[12px] font-semibold text-ink leading-tight">Модуль ESP8266-12F</div>
+            <div class="mt-1 text-[11px] text-muted">800 шт · BYN 2 400</div>
+            <div class="mt-1.5 flex flex-wrap gap-1">
+              <span class="rounded-full bg-blue-50 dark:bg-blue-500/15 px-2 py-0.5 text-[10px] font-semibold text-blue-600 dark:text-blue-300">под сделку СД-2280</span>
+              <span class="rounded-full bg-amber-50 dark:bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-300">ждёт руков.</span>
+            </div>
+            <div class="mt-1 text-[10px] text-faint">Сидоров К. · 2-й день</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Колонка 6: Заказ / PO (#14B8A6) ── -->
+      <div class="w-52 flex-shrink-0">
+        <div class="flex items-center gap-2 mb-2.5">
+          <span class="w-2.5 h-2.5 rounded-full flex-shrink-0" style="background:#14B8A6"></span>
+          <span class="text-[12px] font-semibold text-ink">Заказ / PO</span>
+          <span class="ml-auto text-[10px] text-faint font-medium">2 · ¥5 300</span>
+        </div>
+        <div class="space-y-2">
+          <div class="card rounded-xl bg-surface p-3 shadow-card hover:ring-1 hover:ring-teal-200 dark:ring-teal-500/40" data-z="stm32" title="Двойной клик — открыть карточку">
+            <div class="text-[12px] font-semibold text-ink leading-tight">STM32F103C8T6</div>
+            <div class="mt-1 text-[11px] text-muted">1 000 шт · Hangxin ¥3.85</div>
+            <div class="mt-1.5 flex flex-wrap gap-1"><span class="rounded-full bg-blue-50 dark:bg-blue-500/15 px-2 py-0.5 text-[10px] font-semibold text-blue-600 dark:text-blue-300">под сделку СД-2278</span></div>
+            <div class="mt-1 text-[10px] text-faint">PO отправлен · 10 июн</div>
+          </div>
+          <div class="card rounded-xl bg-surface p-3 shadow-card hover:ring-1 hover:ring-teal-200 dark:ring-teal-500/40" data-z="led" title="Двойной клик — открыть карточку">
+            <div class="text-[12px] font-semibold text-ink leading-tight">LED 5мм красный</div>
+            <div class="mt-1 text-[11px] text-muted">20 000 шт · 1688 ¥0.07</div>
+            <div class="mt-1.5 flex flex-wrap gap-1"><span class="rounded-full bg-sunken px-2 py-0.5 text-[10px] font-semibold text-muted">пополнение</span></div>
+            <div class="mt-1 text-[10px] text-faint">PO в 1688 · авт. ответ</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Колонка 7: Производство (#6366F1) ── -->
+      <div class="w-52 flex-shrink-0">
+        <div class="flex items-center gap-2 mb-2.5">
+          <span class="w-2.5 h-2.5 rounded-full flex-shrink-0" style="background:#6366F1"></span>
+          <span class="text-[12px] font-semibold text-ink">Производство</span>
+          <span class="ml-auto text-[10px] text-faint font-medium">3 · ¥68 400</span>
+        </div>
+        <div class="space-y-2">
+          <div class="card rounded-xl bg-surface p-3 shadow-card hover:ring-1 hover:ring-indigo-200 dark:ring-indigo-500/40" data-z="cap1000" title="Двойной клик — открыть карточку">
+            <div class="text-[12px] font-semibold text-ink leading-tight">Конд. алюм. 1000мкФ 35В</div>
+            <div class="mt-1 text-[11px] text-muted">8 000 шт · ¥0.38/шт</div>
+            <div class="mt-1.5 flex flex-wrap gap-1"><span class="rounded-full bg-indigo-50 dark:bg-indigo-500/15 px-2 py-0.5 text-[10px] font-semibold text-indigo-600 dark:text-indigo-300">MO-2026-015</span></div>
+            <div class="mt-1 text-[10px] text-faint">ETA склад Китай 20 июн</div>
+          </div>
+          <div class="card rounded-xl bg-surface p-3 shadow-card hover:ring-1 hover:ring-indigo-200 dark:ring-indigo-500/40" data-z="relay24" title="Двойной клик — открыть карточку">
+            <div class="text-[12px] font-semibold text-ink leading-tight">Реле 24VDC SPDT 10A</div>
+            <div class="mt-1 text-[11px] text-muted">600 шт · ¥4.80/шт</div>
+            <div class="mt-1.5 flex flex-wrap gap-1"><span class="rounded-full bg-indigo-50 dark:bg-indigo-500/15 px-2 py-0.5 text-[10px] font-semibold text-indigo-600 dark:text-indigo-300">MO-2026-015</span></div>
+            <div class="mt-1 text-[10px] text-faint">ETA склад Китай 20 июн</div>
+          </div>
+          <div class="card rounded-xl bg-surface p-3 shadow-card hover:ring-1 hover:ring-indigo-200 dark:ring-indigo-500/40 ring-1 ring-emerald-300 dark:ring-emerald-500/40" data-z="trafo" title="Двойной клик — открыть карточку">
+            <div class="text-[12px] font-semibold text-ink leading-tight">Трансформатор ТП-20</div>
+            <div class="mt-1 text-[11px] text-muted">100 шт · ¥36/шт</div>
+            <div class="mt-1.5 flex flex-wrap gap-1">
+              <span class="rounded-full bg-indigo-50 dark:bg-indigo-500/15 px-2 py-0.5 text-[10px] font-semibold text-indigo-600 dark:text-indigo-300">MO-2026-014</span>
+              <span class="rounded-full bg-emerald-50 dark:bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:text-emerald-300">готов → QC</span>
+            </div>
+            <div class="mt-1 text-[10px] text-faint">поставщик уведомил ИИ</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Колонка 8: Приёмка / QC (#F97316) ── -->
+      <div class="w-52 flex-shrink-0">
+        <div class="flex items-center gap-2 mb-2.5">
+          <span class="w-2.5 h-2.5 rounded-full flex-shrink-0" style="background:#F97316"></span>
+          <span class="text-[12px] font-semibold text-ink">Приёмка / QC</span>
+          <span class="ml-auto text-[10px] text-faint font-medium">1 · BYN 980</span>
+        </div>
+        <div class="space-y-2">
+          <div class="card rounded-xl bg-surface p-3 shadow-card hover:ring-1 hover:ring-orange-200 dark:ring-orange-500/40" data-z="db9" title="Двойной клик — открыть карточку">
+            <div class="text-[12px] font-semibold text-ink leading-tight">Разъём DB9 9pin Male</div>
+            <div class="mt-1 text-[11px] text-muted">500 шт · MO-2026-014</div>
+            <div class="mt-1.5 flex flex-wrap gap-1"><span class="rounded-full bg-blue-50 dark:bg-blue-500/15 px-2 py-0.5 text-[10px] font-semibold text-blue-600 dark:text-blue-300">под сделку СД-2275</span></div>
+            <div class="mt-1 text-[10px] text-muted">вскрытие партии ✓ · QC протокол</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Колонка 9: Завершено (#22C55E) ── -->
+      <div class="w-52 flex-shrink-0">
+        <div class="flex items-center gap-2 mb-2.5">
+          <span class="w-2.5 h-2.5 rounded-full flex-shrink-0" style="background:#22C55E"></span>
+          <span class="text-[12px] font-semibold text-ink">Завершено</span>
+          <span class="ml-auto text-[10px] text-faint font-medium">2 · этот мес.</span>
+        </div>
+        <div class="space-y-2">
+          <div class="card rounded-xl bg-surface p-3 shadow-card hover:ring-1 hover:ring-green-200 dark:ring-green-500/40 opacity-75" data-z="photo" title="Двойной клик — открыть карточку">
+            <div class="text-[12px] font-semibold text-ink leading-tight">Фотоэлемент FD-1</div>
+            <div class="mt-1 text-[11px] text-muted">300 шт · MO-2026-013</div>
+            <div class="mt-1.5 flex flex-wrap gap-1"><span class="rounded-full bg-emerald-50 dark:bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:text-emerald-300">оприходован ✓</span></div>
+            <div class="mt-1 text-[10px] text-faint">10 июн · landed cost записан</div>
+          </div>
+          <div class="card rounded-xl bg-surface p-3 shadow-card hover:ring-1 hover:ring-green-200 dark:ring-green-500/40 opacity-75" data-z="hdmi" title="Двойной клик — открыть карточку">
+            <div class="text-[12px] font-semibold text-ink leading-tight">Кабель HDMI 2м</div>
+            <div class="mt-1 text-[11px] text-muted">200 шт · MO-2026-013</div>
+            <div class="mt-1.5 flex flex-wrap gap-1">
+              <span class="rounded-full bg-sunken px-2 py-0.5 text-[10px] font-semibold text-muted">пополнение</span>
+              <span class="rounded-full bg-emerald-50 dark:bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:text-emerald-300">оприходован ✓</span>
+            </div>
+            <div class="mt-1 text-[10px] text-faint">8 июн · landed cost записан</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ============ AI-плашка ============ -->
+  <div class="mx-auto max-w-[1180px] space-y-4 px-6 pb-6 pr-[92px]">
+    <div class="rounded-2xl border border-dashed border-violet-300 dark:border-violet-500/40 bg-violet-50 dark:bg-violet-500/15 p-5">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <span class="flex items-center gap-2">
+          <span class="text-violet-500 dark:text-violet-300">✦</span>
+          <span class="text-[11px] font-semibold uppercase tracking-wide text-violet-600 dark:text-violet-300">ИИ-помощник закупщика · сводка по воронке</span>
+        </span>
+        <span class="inline-flex items-center rounded-full bg-violet-50 dark:bg-violet-500/15 px-2 py-0.5 text-[11px] font-semibold text-violet-600 dark:text-violet-300">Итерация 1 · ИИ (позже)</span>
+      </div>
+      <div class="mt-3 space-y-2">
+        <div class="flex items-start justify-between gap-3">
+          <span class="text-sm text-violet-700 dark:text-violet-300"><span class="font-semibold">1 ·</span> В «Переговорах» 2 позиции у одного поставщика (Hangxin) — объединить в один PO: скидка за объём ~7%, экономия ≈ 1 200 р.</span>
+          <span class="shrink-0 inline-flex items-center rounded-full bg-violet-50 dark:bg-violet-500/15 px-2 py-0.5 text-[11px] font-semibold text-violet-600 dark:text-violet-300">−7% цена</span>
+        </div>
+        <div class="flex items-start justify-between gap-3">
+          <span class="text-sm text-violet-700 dark:text-violet-300"><span class="font-semibold">2 ·</span> «Производство» → Трансформатор ТП-20 (MO-014) готов у поставщика, QC ещё не назначен — риск задержки машины MO-014 (таможня Минск через 2 дня).</span>
+          <span class="shrink-0 inline-flex items-center rounded-full bg-red-50 dark:bg-red-500/15 px-2 py-0.5 text-[11px] font-semibold text-red-600 dark:text-red-300">срочно → QC</span>
+        </div>
+        <div class="flex items-start justify-between gap-3">
+          <span class="text-sm text-violet-700 dark:text-violet-300"><span class="font-semibold">3 ·</span> 3 заявки («Потребность» + «Поиск») могут войти в MO-016 (сбор открыт до 20 июн) — добавить сейчас, иначе следующая машина через 14 дней.</span>
+          <span class="shrink-0 inline-flex items-center rounded-full bg-violet-50 dark:bg-violet-500/15 px-2 py-0.5 text-[11px] font-semibold text-violet-600 dark:text-violet-300">→ MO-016</span>
+        </div>
+      </div>
+    </div>
+
+    <p class="text-xs text-faint">Превью-снимок. Стадии — из stages.py (9 стадий). Демо-данные (BYN/¥). Двойной клик по карточке — полная карточка заявки.</p>
+  </div>
+
+  <!-- ============ ОВЕРЛЕЙ (общий) ============ -->
+  <div class="ovl" id="ovl" onclick="closeAll()"></div>
+
+  <!-- ============ КОМПАКТНОЕ ПРЕВЬЮ (ОДИН клик) ============ -->
+  <aside class="drw2" id="drw2">
+    <div class="border-b border-line p-4">
+      <div class="flex items-center justify-between">
+        <span class="text-[11px] font-semibold uppercase tracking-wide text-faint">Превью заявки</span>
+        <div class="flex gap-1.5">
+          <button class="flex h-7 items-center justify-center gap-1 rounded-lg border border-line px-2 text-[11px] font-semibold text-accent hover:bg-sunken" title="Открыть полный вид" onclick="goFull()">⤢ Полный вид</button>
+          <button class="flex h-7 w-7 items-center justify-center rounded-lg border border-line text-faint hover:bg-sunken" title="Закрыть" onclick="closeAll()">✕</button>
+        </div>
+      </div>
+      <h2 class="mt-2 text-[15px] font-bold text-ink leading-tight" id="c-title">—</h2>
+      <div class="mt-0.5 text-[12px] text-muted" id="c-sub">—</div>
+      <div class="mt-2 flex flex-wrap gap-1.5" id="c-chips"></div>
+    </div>
+    <div class="flex-1 overflow-y-auto p-4" id="c-body"></div>
+    <div class="border-t border-line p-3">
+      <button class="w-full rounded-lg bg-accent py-2.5 text-[13px] font-semibold text-white" onclick="goFull()">Открыть полную карточку →</button>
+      <div class="mt-1.5 text-center text-[10px] text-faint">или двойной клик по карточке</div>
+    </div>
+  </aside>
+
+  <!-- ============ ПОЛНЫЙ ВИД (ДВОЙНОЙ клик) ============ -->
+  <aside class="drw" id="drw">
+    <!-- шапка -->
+    <div class="border-b border-line p-5">
+      <div class="flex items-center justify-between">
+        <span class="text-[12px] text-muted" id="z-num">ZPR-2026-041</span>
+        <div class="flex gap-1.5">
+          <button class="flex h-7 items-center justify-center gap-1 rounded-lg border border-line px-2 text-[11px] font-semibold text-muted hover:bg-sunken" title="Свернуть в превью" onclick="backToCompact()">← Превью</button>
+          <button class="flex h-7 w-7 items-center justify-center rounded-lg border border-line text-faint hover:bg-sunken" title="Редактировать">✎</button>
+          <button class="flex h-7 w-7 items-center justify-center rounded-lg border border-line text-faint hover:bg-sunken" title="Закрыть" onclick="closeAll()">✕</button>
+        </div>
+      </div>
+      <h2 class="mt-2 text-lg font-bold text-ink" id="z-title">Конденсатор 470мкФ 25В</h2>
+      <div class="mt-0.5 text-[13px] text-muted" id="z-sub">5 000 шт · клиент «РадиоДеталь» · Иванов П.</div>
+      <div class="mt-2.5 flex flex-wrap gap-1.5" id="z-chips"></div>
+    </div>
+    <!-- тело -->
+    <div class="flex-1 overflow-y-auto p-5 space-y-0" id="z-body"></div>
+    <!-- футер -->
+    <div class="border-t border-line p-4 flex gap-2">
+      <button class="flex-1 rounded-lg bg-accent py-2.5 text-[13px] font-semibold text-white">→ Следующая стадия</button>
+      <button class="rounded-lg border border-line px-3 py-2.5 text-[13px] font-semibold text-muted">Создать PO</button>
+      <button class="rounded-lg border border-line px-3 py-2.5 text-[13px] font-semibold text-muted">Образец</button>
+    </div>
+  </aside>
+
+  <script>
+    const STAGES = ["Потребность","Поиск","Переговоры","Анализ","Согласование","PO","Производство","Приёмка","Готово"];
+
+    // helper-бейдж качества/надёжности
+    const relColor = r => r==="Надёжный"||r==="Стратегич." ? "bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+                        : r==="Осторожно" ? "bg-amber-50 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300"
+                        : r==="Риск"||r==="Не проверен" ? "bg-red-50 dark:bg-red-500/15 text-red-600 dark:text-red-300" : "bg-sunken text-muted";
+
+    // ── Данные заявок (демо). Полные карточки: cap470, relay_srd, cap100, bc547, esp8266, stm32, trafo ──
+    const Z = {
+      cap470: {
+        num:"ZPR-2026-041", title:"Конденсатор 470мкФ 25В", sub:"5 000 шт · клиент «РадиоДеталь» · Иванов П.",
+        stageIdx:0, source:"под сделку СД-2287", qty:"5 000 шт", budget:"BYN ~2 600",
+        suppliers:[
+          {n:"Shenzhen Hangxin 深圳航芯", price:"¥0.50", lead:"22 дн", defect:"0.4%", rel:"Надёжный", landed:"BYN 0.61", best:true},
+          {n:"Yuxin Electronics", price:"¥0.46", lead:"28 дн", defect:"2.1%", rel:"Осторожно", landed:"BYN 0.63"},
+          {n:"阿里巴巴 商家 (1688)", price:"¥0.44", lead:"30 дн", defect:"—", rel:"Не проверен", landed:"BYN 0.66"},
+        ],
+        verdict:"Самая низкая цена (Yuxin/1688) ≠ низкая себестоимость: у Hangxin цена выше на 9%, но брак 0.4% против 2.1% и срок короче на неделю → landed cost ниже и нет риска сорвать машину. Берём Hangxin.",
+        landed:{invoice:"¥0.50 / шт", over:"+22% (фрахт, пошлина, лог.)", unit:"BYN 0.61 / шт", batch:"BYN 3 050", price:"BYN 0.95 (наценка 56%)"},
+        quality:{spec:"470мкФ ±20%, 25В, 105°C, 8×12мм", checks:["Фото партии до отгрузки","Образец 5 шт на тест ESR","Инспекция AQL 2.5 на складе Китая"], defectHist:"Hangxin: брак 0.4% за 12 мес (5 партий)", warranty:"замена брака за счёт поставщика"},
+        rel:{status:"Стратегич.", years:"8 лет", vol:"¥420к / год", otd:"97%", trend:"цена стабильна ↘", frame:"рамочное соглашение 2026, фикс-цена на топ-20 SKU"},
+        msgs:[{d:"in",t:"470uF 25V 现货, ¥0.50, 22天",m:"WeChat · перевод ИИ: в наличии, ¥0.50, 22 дня"},{d:"out",t:"Нужен образец на тест ESR + фото партии",m:"ИИ · отправлено"}],
+        ai:[{t:"Объединить с заявкой Диод 1N4007 (тот же Hangxin) в один PO → −7% за объём",b:"−7%"},{t:"Зафиксировать цену в рамочном соглашении до роста сырья в Q3",b:"риск цены"}]
+      },
+      relay_srd: {
+        num:"ZPR-2026-042", title:"Реле SRD-05VDC 10A", sub:"1 200 шт · клиент «ЭлектроМир» · Петрова А.",
+        stageIdx:1, source:"под сделку СД-2290", qty:"1 200 шт", budget:"BYN ~1 440",
+        suppliers:[
+          {n:"Shenzhen Hangxin 深圳航芯", price:"¥0.78", lead:"22 дн", defect:"0.5%", rel:"Надёжный", landed:"BYN 0.96", best:true},
+          {n:"Yuxin Electronics", price:"¥0.74", lead:"26 дн", defect:"1.8%", rel:"Осторожно", landed:"BYN 0.98"},
+        ],
+        verdict:"ИИ запросил цены у 3 поставщиков, 2 ответили. Hangxin дороже на 5%, но проверенный, брак втрое ниже — рекомендован.",
+        quality:{spec:"5VDC, 10A 250VAC, SPDT", checks:["Сертификат соответствия","Образец 10 шт","Фото партии"], defectHist:"новая позиция у поставщика", warranty:"гарантия 12 мес"},
+        rel:{status:"Стратегич.", years:"8 лет", vol:"¥420к / год", otd:"97%", trend:"стабильно", frame:"рамочное соглашение 2026"},
+        ai:[{t:"Цена получена — ИИ подготовил ответ продавцу (цена BYN + срок 22 дня)",b:"ответ готов"}]
+      },
+      cap100: {
+        num:"ZPR-2026-039", title:"Конденсатор 100мкФ 16В", sub:"10 000 шт · клиент «ТехноПром» · СД-2288",
+        stageIdx:2, source:"под сделку СД-2288", qty:"10 000 шт", budget:"¥1 200",
+        suppliers:[
+          {n:"Yuxin Electronics", price:"¥0.12", lead:"25 дн", defect:"1.5%", rel:"Осторожно", landed:"BYN 0.16", best:true},
+          {n:"Shenzhen Hangxin", price:"¥0.13", lead:"22 дн", defect:"0.4%", rel:"Надёжный", landed:"BYN 0.17"},
+        ],
+        verdict:"ИИ ведёт переговоры в WeChat: добивается ¥0.115 при объёме 10к + предоплате 30%. Текущая цель — снизить с ¥0.12.",
+        quality:{spec:"100мкФ ±20%, 16В, 105°C", checks:["Образец на тест","Фото партии"], defectHist:"Yuxin: брак 1.5% — держать на контроле", warranty:"замена брака"},
+        rel:{status:"Одобрен", years:"2 года", vol:"¥85к / год", otd:"88%", trend:"торгуется", frame:"без рамочного — разовые PO"},
+        msgs:[{d:"in",t:"10000个 ¥0.12, 可以 ¥0.118 预付30%",m:"WeChat · перевод ИИ: 10000 шт ¥0.12, можем ¥0.118 при предоплате 30%"},{d:"out",t:"Целимся в ¥0.115, подтвердите срок 25 дней",m:"черновик ИИ · на ревью"}],
+        ai:[{t:"ИИ торгуется: добивается ¥0.115 (−4%), экономия ≈ ¥50 на партии",b:"−4%"},{t:"Yuxin брак 1.5% — добавить инспекцию AQL перед отгрузкой",b:"качество"}]
+      },
+      bc547: {
+        num:"ZPR-2026-037", title:"Транзистор BC547", sub:"5 000 шт · клиент по СД-2285 · анализ поставщика",
+        stageIdx:3, source:"под сделку СД-2285", qty:"5 000 шт", budget:"¥900",
+        suppliers:[
+          {n:"Suzhou Precision", price:"¥0.18", lead:"24 дн", defect:"0.3%", rel:"Надёжный", landed:"BYN 0.24", best:true},
+          {n:"Новый поставщик (1688)", price:"¥0.15", lead:"30 дн", defect:"—", rel:"Риск", landed:"BYN 0.21"},
+        ],
+        verdict:"ИИ проверил нового поставщика через 企信宝: <1 года, микро-капитал, найдены жалобы → РИСК. Несмотря на цену −17%, рекомендован проверенный Suzhou.",
+        quality:{spec:"NPN, 45В, 100мА, TO-92", checks:["企信宝 проверка поставщика","Образец 10 шт","COC сертификат"], defectHist:"Suzhou: брак 0.3% за 6 мес", warranty:"гарантия"},
+        rel:{status:"Надёжный", years:"6 лет", vol:"¥160к / год", otd:"95%", trend:"стабильно", frame:"одобренный поставщик"},
+        ai:[{t:"Новый поставщик с 1688 — РИСК (企信宝: жалобы, <1 года). Не предоплачивать.",b:"риск"},{t:"Suzhou дороже, но надёжный — берём под сделку СД-2285",b:"качество"}]
+      },
+      esp8266: {
+        num:"ZPR-2026-035", title:"Модуль ESP8266-12F", sub:"800 шт · клиент по СД-2280 · ждёт согласования руков.",
+        stageIdx:4, source:"под сделку СД-2280", qty:"800 шт", budget:"BYN 2 400",
+        suppliers:[
+          {n:"Shenzhen Hangxin", price:"¥6.20", lead:"22 дн", defect:"0.6%", rel:"Надёжный", landed:"BYN 2.55", best:true},
+        ],
+        verdict:"Сумма BYN 2 400 превышает лимит закупщика (BYN 2 000) → ушло на согласование руководителю. 2-й день — напомнить.",
+        landed:{invoice:"¥6.20 / шт", over:"+19%", unit:"BYN 2.55 / шт", batch:"BYN 2 040", price:"BYN 3.90 (наценка 53%)"},
+        quality:{spec:"ESP8266, 4MB flash, антенна PCB", checks:["Прошивка-тест образца","Фото партии"], defectHist:"Hangxin: брак 0.6%", warranty:"гарантия"},
+        rel:{status:"Стратегич.", years:"8 лет", vol:"¥420к / год", otd:"97%", trend:"стабильно", frame:"рамочное соглашение"},
+        ai:[{t:"Превышен лимит закупщика — ждёт руководителя 2-й день, напомнить",b:"согласование"},{t:"Войдёт в машину MO-016 (сбор до 20 июн)",b:"→ MO-016"}]
+      },
+      stm32: {
+        num:"ZPR-2026-031", title:"STM32F103C8T6", sub:"1 000 шт · клиент по СД-2278 · PO отправлен",
+        stageIdx:5, source:"под сделку СД-2278", qty:"1 000 шт", budget:"¥3 850",
+        suppliers:[
+          {n:"Shenzhen Hangxin", price:"¥3.85", lead:"22 дн", defect:"0.4%", rel:"Надёжный", landed:"BYN 5.95", best:true},
+          {n:"Yuxin (аналог GD32)", price:"¥3.55", lead:"26 дн", defect:"1.2%", rel:"Осторожно", landed:"BYN 5.60"},
+        ],
+        verdict:"PO отправлен Hangxin 10 июн. ВНИМАНИЕ: мониторинг цен зафиксировал рост STM32 +12% на 1688 — закупка по старой цене вовремя.",
+        landed:{invoice:"¥3.85 / шт", over:"+22%", unit:"BYN 5.95 / шт", batch:"BYN 5 950", price:"BYN 8.90 (наценка 50%)"},
+        quality:{spec:"ARM Cortex-M3, 64KB, LQFP48", checks:["Образец-прошивка ✓","Фото партии запрошено","Маркировка/подделка-проверка"], defectHist:"Hangxin: брак 0.4%", warranty:"гарантия, защита от контрафакта"},
+        rel:{status:"Стратегич.", years:"8 лет", vol:"¥420к / год", otd:"97%", trend:"рост рынка +12% — мы зафиксировали цену", frame:"рамочное соглашение, фикс-цена"},
+        msgs:[{d:"out",t:"PO-2026-031 подтверждён, 1000 шт @ ¥3.85",m:"WeChat · ИИ"},{d:"in",t:"已确认, 22天交货",m:"перевод ИИ: подтверждено, 22 дня"}],
+        docs:[{n:"PO-2026-031",st:"posted",lbl:"отправлен"},{n:"Proforma Invoice",st:"posted",lbl:"получен"}],
+        ai:[{t:"Цена зафиксирована до роста рынка (+12% на 1688) — экономия ≈ ¥460",b:"−12% рынок"},{t:"Проверка на контрафакт при приёмке (маркировка партии)",b:"качество"}]
+      },
+      trafo: {
+        num:"ZPR-2026-028", title:"Трансформатор ТП-20", sub:"100 шт · машина MO-2026-014 · готов, QC не назначен",
+        stageIdx:6, source:"под сделку СД-2272", qty:"100 шт", budget:"¥3 600",
+        suppliers:[{n:"Suzhou Precision", price:"¥36.00", lead:"30 дн", defect:"0.8%", rel:"Надёжный", landed:"BYN 58.0", best:true}],
+        verdict:"Поставщик уведомил ИИ: партия готова. СРОЧНО назначить QC — машина MO-014 на таможне Минск через 2 дня, иначе задержка.",
+        quality:{spec:"220/12В, 20Вт, тор", checks:["Инспекция перед отгрузкой ОБЯЗАТЕЛЬНО","Тест под нагрузкой","Фото+видео партии"], defectHist:"Suzhou: брак 0.8% — трансформаторы критичны", warranty:"гарантия 24 мес"},
+        rel:{status:"Надёжный", years:"6 лет", vol:"¥160к / год", otd:"95%", trend:"стабильно", frame:"одобренный"},
+        ai:[{t:"СРОЧНО → назначить QC: машина MO-014 на таможне через 2 дня",b:"срочно"},{t:"Заказать инспекцию у агента в Шэньчжэне (¥150) — критичная позиция",b:"качество"}]
+      },
+      // ── лёгкие карточки (демо, краткий вид) ──
+      esp32:{num:"ZPR-2026-044",title:"Чип ESP32-C3-WROOM-02",sub:"1 000 шт · пополнение · автозаявка",stageIdx:0,source:"пополнение",qty:"1 000 шт",budget:"BYN ~1 440",suppliers:[{n:"Shenzhen Hangxin",price:"¥9.80",lead:"22 дн",defect:"0.5%",rel:"Надёжный",landed:"BYN 1.50",best:true}],verdict:"Автозаявка по минимальному остатку. ИИ подобрал проверенного поставщика.",quality:{spec:"ESP32-C3, RISC-V, WiFi+BLE",checks:["Образец","Фото партии"],defectHist:"Hangxin 0.5%",warranty:"гарантия"},rel:{status:"Стратегич.",years:"8 лет",vol:"¥420к / год",otd:"97%",trend:"стабильно",frame:"рамочное"},ai:[{t:"Добавить в MO-016 для консолидации доставки",b:"→ MO-016"}]},
+      usbc:{num:"ZPR-2026-043",title:"Разъём USB-C 24pin SMD",sub:"20 000 шт · клиент «ТехноПром» · СД-2291",stageIdx:1,source:"под сделку СД-2291",qty:"20 000 шт",budget:"BYN ~4 800",suppliers:[{n:"Taobao 店铺",price:"¥1.00",lead:"20 дн",defect:"1.0%",rel:"Осторожно",landed:"BYN 1.30",best:true},{n:"1688 商家",price:"¥1.10",lead:"25 дн",defect:"—",rel:"Не проверен",landed:"BYN 1.42"}],verdict:"Мониторинг цен: USB-C подешевел −9% на Alibaba — удачный момент. ИИ проверяет поставщиков.",quality:{spec:"USB-C 2.0, 24pin, SMD",checks:["Образец на циклы вставки","Фото партии"],defectHist:"новая позиция",warranty:"гарантия"},rel:{status:"Новый",years:"—",vol:"—",otd:"—",trend:"подешевел −9%",frame:"проверка до PO"},ai:[{t:"Цена упала −9% — закупить под пополнение тоже",b:"момент цены"}]},
+      res10k:{num:"ZPR-2026-040",title:"Резистор 10кОм 1% 0.25W",sub:"100 000 шт · пополнение · Ковалёв А.",stageIdx:1,source:"пополнение",qty:"100 000 шт",budget:"BYN ~2 000",suppliers:[{n:"Shenzhen Hangxin",price:"¥0.012",lead:"22 дн",defect:"0.2%",rel:"Надёжный",landed:"BYN 0.022",best:true}],verdict:"Массовая позиция, автозаявка. Берём у стратегического поставщика по рамочной цене.",quality:{spec:"10кОм ±1%, 0.25Вт, 0805",checks:["Выборочный тест номинала"],defectHist:"Hangxin 0.2%",warranty:"гарантия"},rel:{status:"Стратегич.",years:"8 лет",vol:"¥420к / год",otd:"97%",trend:"стабильно",frame:"рамочное, фикс-цена"},ai:[{t:"Консолидировать с другими SMD в один PO Hangxin",b:"−объём"}]},
+      diode:{num:"ZPR-2026-038",title:"Диод 1N4007",sub:"50 000 шт · пополнение · ведёт ИИ",stageIdx:2,source:"пополнение",qty:"50 000 шт",budget:"¥3 000",suppliers:[{n:"Shenzhen Hangxin",price:"¥0.060",lead:"22 дн",defect:"0.3%",rel:"Надёжный",landed:"BYN 0.095",best:true}],verdict:"ИИ просит скидку 5% за объём 50к. Поставщик рассматривает.",quality:{spec:"1000В 1А, DO-41",checks:["Выборочный тест"],defectHist:"Hangxin 0.3%",warranty:"гарантия"},rel:{status:"Стратегич.",years:"8 лет",vol:"¥420к / год",otd:"97%",trend:"стабильно",frame:"рамочное"},ai:[{t:"Объединить с Конденсатором 470мкФ (тот же Hangxin) → −7% PO",b:"−7%"}]},
+      choke:{num:"ZPR-2026-036",title:"Дроссель 100мкГн SMD",sub:"2 000 шт · пополнение · сравнение 2 поставщиков",stageIdx:3,source:"пополнение",qty:"2 000 шт",budget:"BYN ~700",suppliers:[{n:"Suzhou Precision",price:"¥0.31",lead:"24 дн",defect:"0.4%",rel:"Надёжный",landed:"BYN 0.41",best:true},{n:"Taobao 店铺",price:"¥0.29",lead:"22 дн",defect:"1.2%",rel:"Осторожно",landed:"BYN 0.40"}],verdict:"Почти равная себестоимость, но у Suzhou брак втрое ниже — берём Suzhou.",quality:{spec:"100мкГн, SMD 1210",checks:["Тест индуктивности","Фото"],defectHist:"Suzhou 0.4%",warranty:"гарантия"},rel:{status:"Надёжный",years:"6 лет",vol:"¥160к / год",otd:"95%",trend:"стабильно",frame:"одобренный"},ai:[{t:"Цена равная — решает качество. Suzhou.",b:"качество"}]},
+      led:{num:"ZPR-2026-030",title:"LED 5мм красный",sub:"20 000 шт · пополнение · PO в 1688",stageIdx:5,source:"пополнение",qty:"20 000 шт",budget:"¥1 400",suppliers:[{n:"Shenzhen Hangxin",price:"¥0.070",lead:"22 дн",defect:"0.5%",rel:"Надёжный",landed:"BYN 0.11",best:true}],verdict:"PO размещён автоматически в 1688, авто-подтверждение получено.",quality:{spec:"5мм, красный, 620нм",checks:["Выборочный тест яркости"],defectHist:"Hangxin 0.5%",warranty:"гарантия"},rel:{status:"Стратегич.",years:"8 лет",vol:"¥420к / год",otd:"97%",trend:"стабильно",frame:"рамочное"},docs:[{n:"PO-2026-030",st:"posted",lbl:"в 1688"}],ai:[{t:"Авто-PO по рамочной цене — без участия закупщика",b:"авто"}]},
+      cap1000:{num:"ZPR-2026-026",title:"Конд. алюм. 1000мкФ 35В",sub:"8 000 шт · машина MO-2026-015 · производство",stageIdx:6,source:"пополнение",qty:"8 000 шт",budget:"¥3 040",suppliers:[{n:"Yuxin Electronics",price:"¥0.38",lead:"25 дн",defect:"1.0%",rel:"Осторожно",landed:"BYN 0.49",best:true}],verdict:"В производстве у поставщика, ETA склад Китай 20 июн → машина MO-015.",quality:{spec:"1000мкФ, 35В, 105°C",checks:["Образец ESR","Фото партии","AQL на складе"],defectHist:"Yuxin 1.0%",warranty:"замена брака"},rel:{status:"Одобрен",years:"2 года",vol:"¥85к / год",otd:"88%",trend:"на контроле",frame:"разовые PO"},ai:[{t:"Yuxin OTD 88% — следить за сроком, машина MO-015 ждёт",b:"риск срока"}]},
+      relay24:{num:"ZPR-2026-025",title:"Реле 24VDC SPDT 10A",sub:"600 шт · машина MO-2026-015 · производство",stageIdx:6,source:"под сделку СД-2270",qty:"600 шт",budget:"¥2 880",suppliers:[{n:"Suzhou Precision",price:"¥4.80",lead:"30 дн",defect:"0.5%",rel:"Надёжный",landed:"BYN 7.6",best:true}],verdict:"В производстве, ETA склад Китай 20 июн, едет в MO-015.",quality:{spec:"24VDC, 10A, SPDT",checks:["Тест срабатывания","Фото"],defectHist:"Suzhou 0.5%",warranty:"гарантия 12 мес"},rel:{status:"Надёжный",years:"6 лет",vol:"¥160к / год",otd:"95%",trend:"стабильно",frame:"одобренный"},ai:[{t:"В графике машины MO-015",b:"OK"}]},
+      db9:{num:"ZPR-2026-022",title:"Разъём DB9 9pin Male",sub:"500 шт · машина MO-2026-014 · приёмка/QC",stageIdx:7,source:"под сделку СД-2275",qty:"500 шт",budget:"BYN 980",suppliers:[{n:"Taobao 店铺",price:"¥1.50",lead:"20 дн",defect:"0.9%",rel:"Осторожно",landed:"BYN 1.96",best:true}],verdict:"Партия пришла, вскрытие выполнено, идёт QC по протоколу (AQL 2.5).",quality:{spec:"DB9, 9pin, Male, пайка",checks:["Вскрытие партии ✓","QC протокол AQL 2.5 — идёт","Фото дефектов"],defectHist:"Taobao 0.9%",warranty:"претензия при браке >AQL"},rel:{status:"Осторожно",years:"3 года",vol:"¥60к / год",otd:"90%",trend:"на контроле",frame:"разовые"},ai:[{t:"При браке >2.5% — авто-претензия поставщику с фото",b:"качество"}]},
+      photo:{num:"ZPR-2026-018",title:"Фотоэлемент FD-1",sub:"300 шт · машина MO-2026-013 · завершено",stageIdx:8,source:"под сделку СД-2268",qty:"300 шт",budget:"—",suppliers:[{n:"Suzhou Precision",price:"¥2.20",lead:"28 дн",defect:"0.0%",rel:"Надёжный",landed:"BYN 3.55",best:true}],verdict:"Оприходован 10 июн, landed cost записан, передан в WMS и прайс.",landed:{invoice:"¥2.20 / шт",over:"+24%",unit:"BYN 3.55 / шт",batch:"BYN 1 065",price:"BYN 5.40"},quality:{spec:"FD-1 фотодиод",checks:["QC пройден без брака ✓"],defectHist:"Suzhou 0.0% на этой партии",warranty:"—"},rel:{status:"Надёжный",years:"6 лет",vol:"¥160к / год",otd:"95%",trend:"стабильно",frame:"одобренный"},ai:[{t:"Себестоимость передана в прайс — база для цены продажи",b:"готово"}]},
+      hdmi:{num:"ZPR-2026-017",title:"Кабель HDMI 2м",sub:"200 шт · пополнение · завершено",stageIdx:8,source:"пополнение",qty:"200 шт",budget:"—",suppliers:[{n:"1688 商家",price:"¥8.00",lead:"22 дн",defect:"1.5%",rel:"Осторожно",landed:"BYN 11.2",best:true}],verdict:"Оприходован 8 июн, landed cost записан.",landed:{invoice:"¥8.00 / шт",over:"+20%",unit:"BYN 11.2 / шт",batch:"BYN 2 240",price:"BYN 16.5"},quality:{spec:"HDMI 2.0, 2м",checks:["QC пройден ✓ (брак 1.0% < AQL)"],defectHist:"1688: брак 1.5%",warranty:"—"},rel:{status:"Осторожно",years:"2 года",vol:"¥40к / год",otd:"85%",trend:"на контроле",frame:"разовые"},ai:[{t:"Поставщик OTD 85% — рассмотреть замену для постоянной позиции",b:"отношения"}]},
+    };
+
+    // ── Переписка по поставщикам + договор/условия (демо, для ключевых заявок) ──
+    const baseTerms={incoterms:"FOB Shenzhen",currency:"CNY (¥) · оплата по курсу НБ РБ на дату платежа",pay:"предоплата 30% / 70% против копии B/L",lead:"22 дня после предоплаты",moq:"5 000 шт",packing:"антистатик, короба по 1000 шт, маркировка по ТЗ",quality:"AQL 2.5 · сертификат COC · замена брака за счёт поставщика",penalty:"0.1%/день за просрочку, не более 10% суммы",warranty:"12 мес",fm:"форс-мажор по правилам ICC",arb:"арбитраж CIETAC (Шэньчжэнь)"};
+
+    Z.cap470.threads=[
+      {sup:"Shenzhen Hangxin",ch:"WeChat",rel:"Надёжный",price:"¥0.50 · 22 дн · брак 0.4%",msgs:[
+        {d:"in",t:"470uF 25V 现货, ¥0.50, MOQ 5000, 22天",m:"перевод ИИ: в наличии ¥0.50, MOQ 5000, 22 дня"},
+        {d:"out",t:"Нужен образец 5 шт на тест ESR + фото партии",m:"ИИ · отправлено"},
+        {d:"in",t:"没问题, 明天发样品",m:"перевод ИИ: без проблем, завтра отправим образец"}]},
+      {sup:"Yuxin Electronics",ch:"email",rel:"Осторожно",price:"¥0.46 · 28 дн · брак 2.1%",msgs:[
+        {d:"in",t:"PI attached: ¥0.46/pc, lead 28 days",m:"перевод ИИ: ¥0.46/шт, срок 28 дней"},
+        {d:"out",t:"Прошлая партия брак 2.1% — какие гарантии качества?",m:"ИИ"}]},
+      {sup:"阿里巴巴 商家 (1688)",ch:"1688",rel:"Не проверен",price:"¥0.44 · 30 дн",msgs:[
+        {d:"in",t:"¥0.44, 30天发货",m:"перевод ИИ: ¥0.44, отгрузка 30 дней"},
+        {d:"out",t:"Сначала проверка 企信宝 — предоплату не вносим",m:"ИИ · контроль риска"}]}];
+    Z.cap470.contract={template:"Разовый договор поставки (импорт CN)",status:"черновик ИИ",terms:{...baseTerms,moq:"5 000 шт"}};
+    Z.cap470.docs=[{n:"Запрос образца (Hangxin)",st:"posted",lbl:"отправлен"},{n:"Proforma Invoice — черновик",st:"pending",lbl:"ожидается"}];
+
+    Z.cap100.threads=[
+      {sup:"Yuxin Electronics",ch:"WeChat",rel:"Осторожно",price:"¥0.118 · 25 дн · брак 1.5%",msgs:[
+        {d:"in",t:"10000个 ¥0.12, 可以 ¥0.118 预付30%",m:"перевод ИИ: 10000 шт ¥0.12, можем ¥0.118 при предоплате 30%"},
+        {d:"out",t:"Целимся в ¥0.115, подтвердите срок 25 дней",m:"черновик ИИ · на ревью"}]},
+      {sup:"Shenzhen Hangxin",ch:"WeChat",rel:"Надёжный",price:"¥0.13 · 22 дн · брак 0.4%",msgs:[
+        {d:"in",t:"100uF 16V ¥0.13, 质量稳定",m:"перевод ИИ: ¥0.13, качество стабильное"},
+        {d:"out",t:"Дороже Yuxin, но держим как запасной (брак ниже)",m:"ИИ · заметка"}]}];
+    Z.cap100.contract={template:"Разовый договор поставки (импорт CN)",status:"на согласовании условий",terms:{...baseTerms,moq:"10 000 шт",lead:"25 дней после предоплаты",pay:"предоплата 30% / 70% против B/L"}};
+    Z.cap100.docs=[{n:"PI (Yuxin) — проект",st:"pending",lbl:"на согласовании"}];
+
+    Z.bc547.threads=[
+      {sup:"Suzhou Precision",ch:"email",rel:"Надёжный",price:"¥0.18 · 24 дн · брак 0.3%",msgs:[
+        {d:"in",t:"BC547 ¥0.18, COC сертификат прилагаем",m:"перевод ИИ: ¥0.18, сертификат COC есть"},
+        {d:"out",t:"Берём, пришлите образец 10 шт",m:"ИИ"}]},
+      {sup:"Новый поставщик (1688)",ch:"1688",rel:"Риск",price:"¥0.15 · 30 дн · не проверен",msgs:[
+        {d:"in",t:"¥0.15 最低价!",m:"перевод ИИ: ¥0.15, самая низкая цена!"},
+        {d:"out",t:"企信宝: <1 года, жалобы → ОТКЛОНЕНО, предоплату не вносим",m:"ИИ · контроль риска"}]}];
+    Z.bc547.contract={template:"Договор на пробную партию + рамочный (после QC)",status:"черновик ИИ",terms:{...baseTerms,moq:"5 000 шт",lead:"24 дня",quality:"AQL 2.5 · COC · 100% входной контроль первой партии"}};
+
+    Z.stm32.threads=[
+      {sup:"Shenzhen Hangxin",ch:"WeChat",rel:"Надёжный",price:"¥3.85 · 22 дн · брак 0.4%",msgs:[
+        {d:"out",t:"PO-2026-031 подтверждён, 1000 шт @ ¥3.85",m:"ИИ"},
+        {d:"in",t:"已确认, 22天交货, 防伪标签",m:"перевод ИИ: подтверждено, 22 дня, с защитной маркировкой"}]}];
+    Z.stm32.contract={template:"Рамочный договор поставки 2026 (фикс-цена на топ-SKU)",status:"подписан",terms:{...baseTerms,moq:"1 000 шт",lead:"22 дня после предоплаты",quality:"AQL 2.5 · защита от контрафакта · замена брака",warranty:"12 мес + защита от подделок"}};
+    Z.stm32.docs=[{n:"Договор РД-2026-007 (рамочный)",st:"posted",lbl:"подписан"},{n:"Счёт-проформа PI-031 (Hangxin)",st:"posted",lbl:"получен"},{n:"PO-2026-031",st:"posted",lbl:"отправлен"}];
+
+    Z.esp8266.contract={template:"Рамочный договор поставки 2026",status:"подписан",terms:{...baseTerms,moq:"800 шт",lead:"22 дня"}};
+    Z.trafo.contract={template:"Договор поставки (критичная позиция, с инспекцией)",status:"подписан",terms:{...baseTerms,moq:"100 шт",lead:"30 дней",quality:"инспекция перед отгрузкой ОБЯЗАТЕЛЬНА · тест под нагрузкой · AQL 1.5",warranty:"24 мес"}};
+
+    function stepper(idx){
+      let s='<div class="flex gap-1 mt-3">';
+      for(let i=0;i<9;i++){ const c=i<idx?'bg-accent':i===idx?'bg-amber-400':'bg-line'; s+=`<div class="h-1.5 flex-1 rounded-full ${c}"></div>`; }
+      s+='</div><div class="flex justify-between mt-1.5 text-[10px] text-faint"><span>'+STAGES[0]+'</span><span class="font-semibold text-amber-600 dark:text-amber-300">'+STAGES[idx]+'</span><span>'+STAGES[8]+'</span></div>';
+      return s;
+    }
+    const sec = (title, inner, add) => `<div class="py-4 border-b border-line"><div class="flex items-center justify-between mb-2.5"><span class="text-[11px] font-semibold uppercase tracking-wide text-faint">${title}</span>${add?`<span class="text-[11px] font-semibold text-accent">${add}</span>`:''}</div>${inner}</div>`;
+
+    function buildBody(d){
+      let h='';
+      // сумма + степпер
+      h+=sec("Стадия и объём",
+        `<div class="flex items-baseline gap-2"><span class="text-2xl font-bold text-ink">${d.qty}</span><span class="text-[13px] text-muted">· бюджет ${d.budget}</span></div>${stepper(d.stageIdx)}`);
+
+      // сравнение поставщиков (TCO) — ключевой блок (↓себестоимость + ↑качество)
+      if(d.suppliers){
+        let rows=d.suppliers.map(s=>`<tr class="border-t border-line ${s.best?'bg-emerald-50/40 dark:bg-emerald-500/15':''}">
+          <td class="py-2 pr-2"><div class="font-medium text-ink text-[12px]">${s.n}</div>${s.best?'<span class="inline-flex items-center rounded-full bg-emerald-100 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700 dark:text-emerald-300 mt-0.5">✓ лучший по TCO</span>':''}</td>
+          <td class="py-2 px-1 text-right">${s.price}</td><td class="py-2 px-1 text-right text-muted">${s.lead}</td>
+          <td class="py-2 px-1 text-right ${parseFloat(s.defect)>1.5?'text-amber-600 dark:text-amber-300 font-semibold':'text-emerald-600 dark:text-emerald-300'}">${s.defect}</td>
+          <td class="py-2 px-1 text-right"><span class="inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${relColor(s.rel)}">${s.rel}</span></td>
+          <td class="py-2 pl-1 text-right font-semibold text-ink">${s.landed}</td></tr>`).join('');
+        h+=sec("Сравнение поставщиков · по себестоимости (TCO), не по цене",
+          `<table class="w-full text-[11px]"><thead><tr class="text-[10px] uppercase tracking-wide text-faint text-right"><th class="text-left font-semibold">Поставщик</th><th class="font-semibold px-1">цена</th><th class="font-semibold px-1">срок</th><th class="font-semibold px-1">брак</th><th class="font-semibold px-1">рейтинг</th><th class="font-semibold pl-1">landed</th></tr></thead><tbody>${rows}</tbody></table>
+          ${d.verdict?`<div class="mt-2.5 rounded-lg bg-violet-50 dark:bg-violet-500/15 border border-violet-100 dark:border-violet-500/40 p-2.5 text-[12px] text-violet-700 dark:text-violet-300"><span class="font-semibold text-violet-600 dark:text-violet-300">✦ Вывод ИИ:</span> ${d.verdict}</div>`:''}`,"＋ запросить ещё");
+      }
+
+      // себестоимость (landed)
+      if(d.landed){
+        h+=sec("Себестоимость (landed cost) · предварительная",
+          `<div class="space-y-1 text-[12px]">
+            <div class="flex justify-between"><span class="text-muted">Цена инвойса</span><span class="font-medium">${d.landed.invoice}</span></div>
+            <div class="flex justify-between"><span class="text-muted">Накладные расходы</span><span class="font-medium text-amber-600 dark:text-amber-300">${d.landed.over}</span></div>
+            <div class="flex justify-between border-t border-line pt-1"><span class="text-muted">Себестоимость ед.</span><span class="font-bold text-ink">${d.landed.unit}</span></div>
+            <div class="flex justify-between"><span class="text-muted">Партия</span><span class="font-medium">${d.landed.batch}</span></div>
+            <div class="flex justify-between"><span class="text-muted">Рекоменд. цена продажи</span><span class="font-semibold text-emerald-600 dark:text-emerald-300">${d.landed.price}</span></div>
+          </div>`,'<a class="text-accent" href="zak-landed-cost-preview.html">расчёт →</a>');
+      }
+
+      // качество (↑качество)
+      if(d.quality){
+        const checks=d.quality.checks.map(c=>`<div class="flex items-start gap-2 text-[12px] text-ink"><span class="mt-0.5 text-emerald-500 dark:text-emerald-300">✓</span><span>${c}</span></div>`).join('');
+        h+=sec("Контроль качества",
+          `<div class="text-[12px] text-muted mb-2">Спецификация: <span class="text-ink">${d.quality.spec}</span></div>
+           <div class="space-y-1">${checks}</div>
+           <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px]"><span class="text-muted">История брака: <span class="text-ink font-medium">${d.quality.defectHist}</span></span><span class="text-muted">Гарантия: <span class="text-ink font-medium">${d.quality.warranty}</span></span></div>`);
+      }
+
+      // поставщик — отношения
+      if(d.rel){
+        h+=sec("Поставщик · отношения",
+          `<div class="grid grid-cols-2 gap-y-1.5 gap-x-3 text-[12px]">
+            <div class="flex justify-between"><span class="text-muted">Статус</span><span class="inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${relColor(d.rel.status)}">${d.rel.status}</span></div>
+            <div class="flex justify-between"><span class="text-muted">На рынке</span><span class="font-medium">${d.rel.years}</span></div>
+            <div class="flex justify-between"><span class="text-muted">Объём/год</span><span class="font-medium">${d.rel.vol}</span></div>
+            <div class="flex justify-between"><span class="text-muted">OTD (в срок)</span><span class="font-medium">${d.rel.otd}</span></div>
+          </div>
+          <div class="mt-2 text-[11px] text-muted">Цена: <span class="text-ink">${d.rel.trend}</span></div>
+          <div class="mt-1 text-[11px] text-muted">Соглашение: <span class="text-ink">${d.rel.frame}</span></div>`);
+      }
+
+      // переписка — по поставщикам (переключатель) либо один тред
+      const renderMsgs = arr => arr.map(x=>`<div class="${x.d==='out'?'ml-auto bg-accent text-white':'bg-sunken text-ink'} max-w-[88%] rounded-xl px-3 py-2 text-[12px] mb-1.5">${x.t}<div class="text-[10px] mt-0.5 ${x.d==='out'?'text-blue-100':'text-faint'}">${x.m}</div></div>`).join('');
+      if(d.threads){
+        const pills=d.threads.map((t,i)=>`<button class="zth-pill ${i===0?'zth-on':''}" onclick="zThread(this,${i})">${t.sup} <span class="inline-flex items-center rounded-full px-1 py-0.5 text-[8px] font-bold ${relColor(t.rel)}">${t.rel}</span></button>`).join('');
+        const panels=d.threads.map((t,i)=>`<div class="zth-panel" data-i="${i}" style="${i?'display:none':''}"><div class="mb-1.5 flex items-center justify-between text-[11px]"><span class="font-semibold text-ink">${t.sup}</span><span class="text-muted">${t.ch} · ${t.price}</span></div><div class="flex flex-col">${renderMsgs(t.msgs)}</div></div>`).join('');
+        h+=sec("Переписка по поставщикам (ведёт ИИ)",`<div data-threads><div class="flex flex-wrap gap-1.5 mb-2.5">${pills}</div>${panels}</div>`,'<a class="text-accent" href="zak-ai-comms-preview.html">все диалоги →</a>');
+      } else if(d.msgs){
+        h+=sec("Переписка (ведёт ИИ)",`<div class="flex flex-col">${renderMsgs(d.msgs)}</div>`,'<a class="text-accent" href="zak-ai-comms-preview.html">открыть →</a>');
+      }
+
+      // документы по сделке (счёт поставщика, договор, спецификация, ДТ…)
+      if(d.docs){
+        const dd=d.docs.map(x=>`<div class="flex items-center justify-between py-1.5 text-[12px]"><span class="text-ink">📄 ${x.n}</span><span class="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${x.st==='posted'?'bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-300':'bg-amber-50 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300'}">${x.lbl}</span></div>`).join('');
+        h+=sec("Документы по сделке",dd,'＋ загрузить');
+      }
+
+      // договор с поставщиком + все условия (шаблон)
+      if(d.contract){
+        const c=d.contract, t=c.terms;
+        const stColor = c.status==='подписан'?'bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-300':c.status.indexOf('согласован')>=0?'bg-amber-50 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300':'bg-violet-50 dark:bg-violet-500/15 text-violet-600 dark:text-violet-300';
+        const row=(k,v)=>`<div class="flex justify-between gap-3 py-1 border-t border-line text-[12px]"><span class="text-muted shrink-0">${k}</span><span class="text-right font-medium text-ink">${v}</span></div>`;
+        h+=sec("Договор с поставщиком · условия",
+          `<div class="flex items-center justify-between gap-2 mb-2">
+             <span class="text-[12px] font-semibold text-ink">${c.template}</span>
+             <span class="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${stColor}">${c.status}</span>
+           </div>
+           ${row('Incoterms',t.incoterms)}${row('Валюта / оплата',t.currency)}${row('Условия оплаты',t.pay)}${row('Срок поставки',t.lead)}${row('MOQ',t.moq)}${row('Упаковка / маркировка',t.packing)}${row('Качество',t.quality)}${row('Штрафы',t.penalty)}${row('Гарантия',t.warranty)}${row('Форс-мажор',t.fm)}${row('Арбитраж',t.arb)}
+           <div class="mt-2.5 flex flex-wrap items-center gap-1.5">
+             <span class="text-[10px] text-faint mr-1">Шаблон:</span>
+             <span class="zth-pill zth-on">Рамочный</span><span class="zth-pill">Разовый</span><span class="zth-pill">Пробная партия</span>
+           </div>
+           <div class="mt-2 text-[11px] text-violet-600 dark:text-violet-300">✦ ИИ заполняет договор по реквизитам поставщика (УНП/банк) и подставляет согласованные в переписке условия (цена, срок, AQL).</div>`,
+          '＋ сформировать');
+      }
+
+      // ИИ-рекомендации
+      if(d.ai){
+        const a=d.ai.map(x=>`<div class="flex items-start justify-between gap-2 mb-1.5"><span class="text-[12px] text-violet-700 dark:text-violet-300">${x.t}</span><span class="shrink-0 inline-flex items-center rounded-full bg-violet-50 dark:bg-violet-500/15 px-2 py-0.5 text-[10px] font-semibold text-violet-600 dark:text-violet-300">${x.b}</span></div>`).join('');
+        h+=`<div class="py-4"><div class="rounded-xl border border-dashed border-violet-300 dark:border-violet-500/40 bg-violet-50 dark:bg-violet-500/15 p-3"><div class="text-[11px] font-semibold uppercase tracking-wide text-violet-600 dark:text-violet-300 mb-2">✦ ИИ-рекомендации по заявке</div>${a}</div></div>`;
+      }
+      return h;
+    }
+
+    let _lastKey=null;
+
+    function chipsFor(d){
+      const srcColor = d.source.startsWith('под сделку')?'bg-blue-50 dark:bg-blue-500/15 text-blue-600 dark:text-blue-300':'bg-sunken text-muted';
+      return `<span class="inline-flex items-center rounded-full bg-amber-50 dark:bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-700 dark:text-amber-300">● ${STAGES[d.stageIdx]}</span>
+        <span class="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold ${srcColor}">${d.source}</span>`;
+    }
+
+    // ── компактное превью (ОДИН клик) ──
+    function buildCompact(d){
+      const best=(d.suppliers||[]).find(s=>s.best)||(d.suppliers||[])[0];
+      let h='';
+      h+=`<div class="flex items-baseline gap-2 mb-1"><span class="text-xl font-bold text-ink">${d.qty}</span><span class="text-[12px] text-muted">· ${d.budget}</span></div>`;
+      h+=stepper(d.stageIdx);
+      if(best){
+        h+=`<div class="mt-4 rounded-xl border border-line bg-sunken p-3">
+          <div class="text-[10px] font-semibold uppercase tracking-wide text-faint">Лучший поставщик (по TCO)</div>
+          <div class="mt-1 text-[13px] font-semibold text-ink">${best.n}</div>
+          <div class="mt-1.5 grid grid-cols-2 gap-y-1 text-[12px]">
+            <span class="text-muted">Цена</span><span class="text-right font-medium">${best.price}</span>
+            <span class="text-muted">Срок</span><span class="text-right font-medium">${best.lead}</span>
+            <span class="text-muted">Брак</span><span class="text-right font-medium">${best.defect}</span>
+            <span class="text-muted">Себестоимость</span><span class="text-right font-bold text-ink">${best.landed}</span>
+          </div>
+        </div>`;
+      }
+      if(d.verdict){ h+=`<div class="mt-2.5 rounded-lg bg-violet-50 dark:bg-violet-500/15 border border-violet-100 dark:border-violet-500/40 p-2.5 text-[12px] text-violet-700 dark:text-violet-300"><span class="font-semibold text-violet-600 dark:text-violet-300">✦ ИИ:</span> ${d.verdict}</div>`; }
+      h+=`<div class="mt-3 text-[11px] text-faint">Полное сравнение поставщиков, качество, отношения, переписка и документы — в полном виде.</div>`;
+      return h;
+    }
+
+    function openCompact(key){
+      const d=Z[key]; if(!d) return; _lastKey=key;
+      document.getElementById('c-title').textContent=d.title;
+      document.getElementById('c-sub').textContent=d.sub;
+      document.getElementById('c-chips').innerHTML=chipsFor(d);
+      document.getElementById('c-body').innerHTML=buildCompact(d);
+      document.getElementById('c-body').scrollTop=0;
+      document.getElementById('drw').classList.remove('show');
+      document.getElementById('ovl').classList.add('show');
+      document.getElementById('drw2').classList.add('show');
+    }
+
+    // ── полный вид (ДВОЙНОЙ клик) ──
+    function openFull(key){
+      const d=Z[key]; if(!d) return; _lastKey=key;
+      document.getElementById('z-num').textContent=d.num;
+      document.getElementById('z-title').textContent=d.title;
+      document.getElementById('z-sub').textContent=d.sub;
+      document.getElementById('z-chips').innerHTML=chipsFor(d);
+      document.getElementById('z-body').innerHTML=buildBody(d);
+      document.getElementById('z-body').scrollTop=0;
+      document.getElementById('drw2').classList.remove('show');
+      document.getElementById('ovl').classList.add('show');
+      document.getElementById('drw').classList.add('show');
+    }
+
+    function goFull(){ if(_lastKey) openFull(_lastKey); }
+    function backToCompact(){ if(_lastKey) openCompact(_lastKey); }
+    // переключатель поставщиков в блоке переписки
+    function zThread(btn,i){
+      const w=btn.closest('[data-threads]'); if(!w) return;
+      w.querySelectorAll('.zth-pill').forEach((p,j)=>p.classList.toggle('zth-on', j===i));
+      w.querySelectorAll('.zth-panel').forEach(p=>p.style.display=(+p.dataset.i===i)?'':'none');
+    }
+    function closeAll(){
+      document.getElementById('ovl').classList.remove('show');
+      document.getElementById('drw').classList.remove('show');
+      document.getElementById('drw2').classList.remove('show');
+    }
+
+    // 1 клик → превью, 2 клика → полный вид (как в отделе продаж)
+    let _ct=null;
+    document.querySelectorAll('.card[data-z]').forEach(c=>{
+      const k=c.getAttribute('data-z');
+      c.addEventListener('click',()=>{ if(_ct) return; _ct=setTimeout(()=>{ _ct=null; openCompact(k); },230); });
+      c.addEventListener('dblclick',()=>{ if(_ct){ clearTimeout(_ct); _ct=null; } openFull(k); });
+    });
+    document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeAll(); });
+  </script>
+</body>
+</html>
