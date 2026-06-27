@@ -67,8 +67,8 @@ def estimate_china_cost(lines: list[CostLine], rates: CostRates) -> dict:
 
     Возврат::
 
-        {"lines": [{sku_code, goods_byn, freight_byn, duty_byn, util_byn,
-                    unit_landed_cost_byn}], "total_landed_byn": Decimal}
+        {"lines": [{sku_code, goods_byn, commission_byn, insurance_byn, freight_byn,
+                    duty_byn, util_byn, unit_landed_cost_byn}], "total_landed_byn": Decimal}
 
     ``unit_landed_cost_byn`` — то же поле, что отдаёт фасад ``last_landed_cost`` (граница с
     продажами): предварительная себестоимость единицы в BYN. Деньги округляются до копейки.
@@ -101,7 +101,10 @@ def estimate_china_cost(lines: list[CostLine], rates: CostRates) -> dict:
 
         out_lines.append({
             "sku_code": ln.sku_code,
+            # компоненты-итоги по позиции в BYN (до буфера курса) — полный набор для разбивки
             "goods_byn": _money(goods * wc_to_byn),
+            "commission_byn": _money(comm * wc_to_byn),
+            "insurance_byn": _money(ins * wc_to_byn),
             "freight_byn": _money(freight * wc_to_byn),
             "duty_byn": _money(duty * wc_to_byn),
             "util_byn": _money(ln.util),

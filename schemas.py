@@ -107,10 +107,11 @@ class CostEstimateLineIn(BaseModel):
 
 
 class CostRatesIn(BaseModel):
-    usd_byn: float
-    cny_rub: float
-    rub_byn: float
-    usd_rub: float
+    usd_byn: float = 0
+    # CNY-путь: курсы для пересчёта юаней; для USD-only запроса не нужны (дефолт 0)
+    cny_rub: float = 0
+    rub_byn: float = 0
+    usd_rub: float = 0
     commission_pct: float = 0
     insurance_pct: float = 0
     freight_usd_per_kg: float = 0
@@ -126,6 +127,8 @@ class CostEstimateRequest(BaseModel):
 class CostEstimateLineOut(BaseModel):
     sku_code: str
     goods_byn: float
+    commission_byn: float
+    insurance_byn: float
     freight_byn: float
     duty_byn: float
     util_byn: float
