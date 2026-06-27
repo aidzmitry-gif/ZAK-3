@@ -29,6 +29,7 @@ from modules.procurement.schemas import (
     CostEstimateOut,
     CostEstimateRequest,
     PurchaseOrderCreate,
+    PurchaseOrderHeaderUpdate,
     PurchaseOrderLineIn,
     PurchaseOrderLineOut,
     PurchaseOrderOut,
@@ -483,6 +484,26 @@ async def delete_order_line(
     if line is None or line.order_id != order.id:
         raise HTTPException(status_code=404, detail="Позиция не найдена")
     await session.delete(line)
+    await session.commit()
+    await session.refresh(order)
+    return (await _orders_out(session, [order]))[0]
+
+
+@router.patch("/orders/{order_id}/header", response_model=PurchaseOrderOut)
+async def update_order_header(
+    order_id: int,
+    payload: PurchaseOrderHeaderUpdate,
+    session: AsyncSession = Depends(get_session),
+):
+    """Править шапку заказа (фрахт/ETA/поставщик) в редакторе машины. Нельзя для принятого (409)."""
+    order = await _require_editable_order(session, order_id)
+    data = payload.model_dump(exclude_unset=True)
+    if "freight_byn" in data:
+        freight = data.pop("freight_byn")
+        if freight is not None:  # freight не nullable — None игнорируем
+            order.freight_byn = Decimal(str(freight))
+    for field, value in data.items():
+        setattr(order, field, value)
     await session.commit()
     await session.refresh(order)
     return (await _orders_out(session, [order]))[0]

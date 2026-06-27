@@ -97,6 +97,16 @@ class PurchaseOrderStatusUpdate(BaseModel):
     status: OrderStatus
 
 
+class PurchaseOrderHeaderUpdate(BaseModel):
+    """Правка шапки заказа в редакторе машины (фрахт/ETA/поставщик). Статус — отдельным
+    эндпоинтом (машина состояний). Все поля опциональны (PATCH)."""
+
+    supplier: str | None = None
+    supplier_id: int | None = None
+    eta_date: date | None = None
+    freight_byn: float | None = None
+
+
 # ───────────────────── Предв. себестоимость (Расчёт Китай) ─────────────────────
 
 
