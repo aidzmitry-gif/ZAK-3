@@ -10,8 +10,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.runtime.core import Core
 from core.runtime.deps import get_core, get_session
 from core.runtime.funnel import FunnelBoardOut, FunnelCard, build_board
-from modules.procurement.models import PurchaseRequest, SupplierClaim
+from core.services.landed_cost import LandedExpense, LandedLine, allocate_landed_cost
+from modules.procurement.models import (
+    OPEN_ORDER_STATUSES,
+    RECEIVED_ORDER_STATUS,
+    LandedCost,
+    PurchaseOrder,
+    PurchaseOrderLine,
+    PurchaseRequest,
+    SupplierClaim,
+)
 from modules.procurement.schemas import (
+    PurchaseOrderCreate,
+    PurchaseOrderLineOut,
+    PurchaseOrderOut,
+    PurchaseOrderStatusUpdate,
     PurchaseRequestCreate,
     PurchaseRequestOut,
     StageUpdate,
@@ -22,7 +35,7 @@ from modules.procurement.stages import STAGES
 
 router = APIRouter(tags=["procurement"])
 
-# Переход в эту стадию = товар физически принят → приход на склад (procurement → wms).
+# Переход в эту стадию воронки = товар физически принят → приход на склад (procurement → wms).
 RECEIVED_STAGE = "qc"
 
 
@@ -43,6 +56,9 @@ def _to_card(r: PurchaseRequest) -> FunnelCard:
         score=score,
         tags=[f"{r.qty} шт"] if r.qty else [],
     )
+
+
+# ───────────────────────── Воронка закупок (PurchaseRequest) ─────────────────────────
 
 
 @router.get("/requests", response_model=list[PurchaseRequestOut])
@@ -103,6 +119,187 @@ async def update_request(
     await session.commit()
     await session.refresh(obj)
     return obj
+
+
+# ───────────────────────── Открытые заказы (PurchaseOrder) + landed cost ─────────────────────────
+
+
+async def _orders_out(session: AsyncSession, orders: list[PurchaseOrder]) -> list[PurchaseOrderOut]:
+    """Собрать заказы с позициями (один запрос на все позиции — без N+1)."""
+    ids = [o.id for o in orders]
+    lines_by_order: dict[int, list[PurchaseOrderLine]] = {}
+    if ids:
+        rows = (
+            await session.execute(
+                select(PurchaseOrderLine)
+                .where(PurchaseOrderLine.order_id.in_(ids))
+                .order_by(PurchaseOrderLine.id)
+            )
+        ).scalars().all()
+        for ln in rows:
+            lines_by_order.setdefault(ln.order_id, []).append(ln)
+    return [
+        PurchaseOrderOut(
+            id=o.id,
+            number=o.number,
+            supplier=o.supplier,
+            status=o.status,
+            eta_date=o.eta_date,
+            freight_byn=float(o.freight_byn),
+            lines=[PurchaseOrderLineOut.model_validate(ln) for ln in lines_by_order.get(o.id, [])],
+        )
+        for o in orders
+    ]
+
+
+async def _fixate_landed_cost(session: AsyncSession, order: PurchaseOrder) -> None:
+    """На приёмке (``received``) разнести фрахт заказа на позиции и зафиксировать
+    себестоимость единицы per-SKU через общий движок ``allocate_landed_cost`` (не второй
+    расчёт). Upsert по (sku_code, заказ): повторная приёмка не плодит дубль.
+
+    Позиции с одинаковым ``sku_code`` агрегируем в одну (одна строка ``LandedCost`` на
+    номенклатуру). Мин.срез: издержки = только фрахт; пошлина по ТН ВЭД, два FX-курса и
+    буфер курса +10% — Горизонт 2 (методика «Расчёт Китай», docs/landed-cost.md).
+    """
+    lines = (
+        await session.execute(
+            select(PurchaseOrderLine).where(PurchaseOrderLine.order_id == order.id)
+        )
+    ).scalars().all()
+    agg: dict[str, dict[str, Decimal]] = {}
+    for ln in lines:
+        if not ln.sku_code:
+            continue  # позиция без номенклатуры — фиксировать не по чему
+        a = agg.setdefault(
+            ln.sku_code,
+            {"qty": Decimal("0"), "goods": Decimal("0"), "weight": Decimal("0"), "volume": Decimal("0")},
+        )
+        a["qty"] += Decimal(ln.qty)
+        a["goods"] += Decimal(ln.goods_value_byn)
+        a["weight"] += Decimal(ln.weight)
+        a["volume"] += Decimal(ln.volume)
+    if not agg:
+        return
+
+    landed_lines = [
+        LandedLine(sku_code=code, qty=a["qty"], weight=a["weight"], volume=a["volume"], goods_value=a["goods"])
+        for code, a in agg.items()
+    ]
+    expenses: list[LandedExpense] = []
+    freight = Decimal(order.freight_byn)
+    if freight:
+        # фрахт по весу (как Odoo); если веса не заданы — по стоимости
+        total_weight = sum((ln.weight for ln in landed_lines), Decimal("0"))
+        expenses.append(LandedExpense("фрахт", freight, "weight" if total_weight > 0 else "value"))
+
+    res = allocate_landed_cost(landed_lines, expenses)
+    shipment_id = order.number or f"purchase_order:{order.id}"
+    existing = {
+        row.sku_code: row
+        for row in (
+            await session.execute(
+                select(LandedCost).where(LandedCost.purchase_order_id == order.id)
+            )
+        ).scalars().all()
+    }
+    for r in res["lines"]:
+        code, unit = r["sku_code"], r["unit_landed_cost"]
+        if code in existing:
+            existing[code].unit_landed_cost_byn = unit
+            existing[code].shipment_id = shipment_id
+        else:
+            session.add(
+                LandedCost(
+                    sku_code=code,
+                    purchase_order_id=order.id,
+                    shipment_id=shipment_id,
+                    unit_landed_cost_byn=unit,
+                    stage="estimated",
+                )
+            )
+
+
+@router.get("/orders", response_model=list[PurchaseOrderOut])
+async def list_orders(session: AsyncSession = Depends(get_session)):
+    """Все заказы поставщикам с позициями (новые первыми)."""
+    orders = (
+        await session.execute(select(PurchaseOrder).order_by(PurchaseOrder.id.desc()))
+    ).scalars().all()
+    return await _orders_out(session, list(orders))
+
+
+@router.get("/open-orders", response_model=list[PurchaseOrderOut])
+async def open_orders(session: AsyncSession = Depends(get_session)):
+    """Открытые заказы (товар не принят) с ETA — sales вычитает «в пути» по номенклатуре.
+    Ближайший ETA первым (заказы без ETA — в конце по сортировке БД)."""
+    orders = (
+        await session.execute(
+            select(PurchaseOrder)
+            .where(PurchaseOrder.status.in_(OPEN_ORDER_STATUSES))
+            .order_by(PurchaseOrder.eta_date, PurchaseOrder.id.desc())
+        )
+    ).scalars().all()
+    return await _orders_out(session, list(orders))
+
+
+@router.post("/orders", response_model=PurchaseOrderOut, status_code=201)
+async def create_order(
+    payload: PurchaseOrderCreate, session: AsyncSession = Depends(get_session)
+):
+    """Создать заказ поставщику с позициями. Номер генерируется, если не задан."""
+    order = PurchaseOrder(
+        supplier=payload.supplier,
+        number=payload.number,
+        status=payload.status,
+        eta_date=payload.eta_date,
+        freight_byn=Decimal(str(payload.freight_byn)),
+    )
+    session.add(order)
+    await session.flush()
+    if not order.number:
+        order.number = f"PO-2026-{order.id:04d}"
+    for ln in payload.lines:
+        session.add(
+            PurchaseOrderLine(
+                order_id=order.id,
+                sku_code=ln.sku_code,
+                qty=Decimal(str(ln.qty)),
+                goods_value_byn=Decimal(str(ln.goods_value_byn)),
+                weight=Decimal(str(ln.weight)),
+                volume=Decimal(str(ln.volume)),
+            )
+        )
+    if order.status == RECEIVED_ORDER_STATUS:  # создан сразу принятым — зафиксировать cost
+        await session.flush()
+        await _fixate_landed_cost(session, order)
+    await session.commit()
+    await session.refresh(order)
+    return (await _orders_out(session, [order]))[0]
+
+
+@router.patch("/orders/{order_id}", response_model=PurchaseOrderOut)
+async def update_order_status(
+    order_id: int,
+    payload: PurchaseOrderStatusUpdate,
+    session: AsyncSession = Depends(get_session),
+):
+    """Сменить статус заказа. При фактической приёмке (``received``) — зафиксировать
+    landed cost по позициям. Повторная приёмка дубль не плодит (upsert)."""
+    order = await session.get(PurchaseOrder, order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    entering_received = (
+        order.status != RECEIVED_ORDER_STATUS and payload.status == RECEIVED_ORDER_STATUS
+    )
+    order.status = payload.status
+    if entering_received:
+        await _fixate_landed_cost(session, order)
+    await session.commit()
+    await session.refresh(order)
+    return (await _orders_out(session, [order]))[0]
+
+
+# ───────────────────────── Претензии поставщикам ─────────────────────────
 
 
 @router.get("/claims", response_model=list[SupplierClaimOut])

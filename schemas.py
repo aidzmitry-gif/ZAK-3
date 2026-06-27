@@ -1,6 +1,8 @@
 """Pydantic-схемы модуля Procurement."""
 from __future__ import annotations
 
+from datetime import date
+
 from pydantic import BaseModel, ConfigDict
 
 
@@ -37,6 +39,56 @@ class PurchaseRequestOut(BaseModel):
 
 class StageUpdate(BaseModel):
     stage: str
+
+
+# ───────────────────────── Открытый заказ (PurchaseOrder) ─────────────────────────
+
+
+class PurchaseOrderLineIn(BaseModel):
+    sku_code: str
+    qty: float = 1
+    goods_value_byn: float = 0
+    weight: float = 0
+    volume: float = 0
+
+
+class PurchaseOrderLineOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    sku_code: str
+    qty: float
+    goods_value_byn: float
+    weight: float
+    volume: float
+
+
+class PurchaseOrderCreate(BaseModel):
+    supplier: str = ""
+    number: str = ""
+    status: str = "ordered"
+    eta_date: date | None = None
+    freight_byn: float = 0
+    lines: list[PurchaseOrderLineIn] = []
+
+
+class PurchaseOrderOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    number: str
+    supplier: str
+    status: str
+    eta_date: date | None = None
+    freight_byn: float
+    lines: list[PurchaseOrderLineOut] = []
+
+
+class PurchaseOrderStatusUpdate(BaseModel):
+    status: str
+
+
+# ───────────────────────── Претензии поставщикам ─────────────────────────
 
 
 class SupplierClaimOut(BaseModel):

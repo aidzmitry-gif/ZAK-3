@@ -4,6 +4,7 @@ from __future__ import annotations
 from core.runtime.contract import ModuleContract, Widget
 from core.runtime.core import Core
 from modules.procurement import events, routes
+from modules.procurement.landed_cost import LandedCostService
 
 
 class ProcurementModule(ModuleContract):
@@ -16,6 +17,8 @@ class ProcurementModule(ModuleContract):
         # брак в производстве → автопретензия поставщику (production → procurement, §2.5)
         core.subscribe("production.scrap", events.on_production_scrap)
         core.register_widget(Widget("procurement", "Закупки", source="procurement.requests"))
+        # себестоимость партии наружу — sales читает через фасад для расчёта маржи (§6)
+        core.services.landed_cost = LandedCostService()
 
 
 def get_module() -> ModuleContract:
