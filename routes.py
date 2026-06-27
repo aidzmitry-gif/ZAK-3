@@ -168,8 +168,9 @@ async def _fixate_landed_cost(session: AsyncSession, order: PurchaseOrder) -> No
     ).scalars().all()
     agg: dict[str, dict[str, Decimal]] = {}
     for ln in lines:
-        if not ln.sku_code:
-            continue  # позиция без номенклатуры — фиксировать не по чему
+        if not ln.sku_code or ln.qty <= 0:
+            continue  # без номенклатуры или с нулевым кол-вом: себестоимость единицы не определена
+            # (иначе записали бы unit=0 → замаскировали бы дыру в марже, нарушив «None ≠ 0»)
         a = agg.setdefault(
             ln.sku_code,
             {"qty": Decimal("0"), "goods": Decimal("0"), "weight": Decimal("0"), "volume": Decimal("0")},
@@ -236,7 +237,8 @@ async def open_orders(session: AsyncSession = Depends(get_session)):
         await session.execute(
             select(PurchaseOrder)
             .where(PurchaseOrder.status.in_(OPEN_ORDER_STATUSES))
-            .order_by(PurchaseOrder.eta_date, PurchaseOrder.id.desc())
+            # nulls_last явно: в SQLite NULL по умолчанию идут первыми, в Postgres — последними
+            .order_by(PurchaseOrder.eta_date.asc().nulls_last(), PurchaseOrder.id.desc())
         )
     ).scalars().all()
     return await _orders_out(session, list(orders))

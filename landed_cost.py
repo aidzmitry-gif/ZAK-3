@@ -45,9 +45,9 @@ class LandedCostService:
     ) -> dict[str, dict | None]:
         # ключ для КАЖДОГО входного кода (None, если строки нет) — иначе каталог-пикер
         # упадёт на result[code]. Один запрос, первая строка на код = последняя (order desc).
+        if not sku_codes:
+            return {}
         result: dict[str, dict | None] = {code: None for code in sku_codes}
-        if not result:
-            return result
         rows = (
             await session.execute(
                 select(LandedCost)

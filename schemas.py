@@ -2,8 +2,13 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
+
+# Статус заказа — закрытый набор (опечатка тихо пропустила бы фиксацию landed cost на приёмке).
+# Должен совпадать с OPEN_ORDER_STATUSES + RECEIVED_ORDER_STATUS в models.py.
+OrderStatus = Literal["ordered", "shipped", "customs", "received"]
 
 
 class PurchaseRequestCreate(BaseModel):
@@ -66,7 +71,7 @@ class PurchaseOrderLineOut(BaseModel):
 class PurchaseOrderCreate(BaseModel):
     supplier: str = ""
     number: str = ""
-    status: str = "ordered"
+    status: OrderStatus = "ordered"
     eta_date: date | None = None
     freight_byn: float = 0
     lines: list[PurchaseOrderLineIn] = []
@@ -85,7 +90,7 @@ class PurchaseOrderOut(BaseModel):
 
 
 class PurchaseOrderStatusUpdate(BaseModel):
-    status: str
+    status: OrderStatus
 
 
 # ───────────────────────── Претензии поставщикам ─────────────────────────
