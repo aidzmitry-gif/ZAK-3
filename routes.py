@@ -95,7 +95,10 @@ async def _board_scores(session: AsyncSession, supplier_ids: set[int]) -> dict[i
     claims = dict(
         (await session.execute(
             select(SupplierClaim.supplier_id, func.count())
-            .where(SupplierClaim.supplier_id.in_(supplier_ids))
+            .where(
+                SupplierClaim.supplier_id.in_(supplier_ids),
+                SupplierClaim.status != "rejected",  # отклонённая претензия = поставщик не виноват
+            )
             .group_by(SupplierClaim.supplier_id)
         )).all()
     )
@@ -243,8 +246,11 @@ def _order_allocation(lines: list[PurchaseOrderLine], freight: Decimal) -> tuple
     ]
     expenses: list[LandedExpense] = []
     if freight and landed_lines:
-        total_weight = sum((ln.weight for ln in landed_lines), Decimal("0"))
-        expenses.append(LandedExpense("фрахт", freight, "weight" if total_weight > 0 else "value"))
+        # фрахт по весу — ТОЛЬКО если вес задан у ВСЕХ позиций; иначе по стоимости. Иначе позиция
+        # с незаполненным весом получила бы 0 фрахта, а весь фрахт лёг бы на позиции с весом
+        # (перекос per-SKU себестоимости → искажение маржи sales и оценки склада).
+        all_weighted = all(ln.weight > 0 for ln in landed_lines)
+        expenses.append(LandedExpense("фрахт", freight, "weight" if all_weighted else "value"))
     return allocate_landed_cost(landed_lines, expenses), agg
 
 
@@ -363,6 +369,8 @@ async def create_order(
     session: AsyncSession = Depends(get_session),
 ):
     """Создать заказ поставщику с позициями. Номер генерируется, если не задан."""
+    if payload.status == "cancelled":
+        raise HTTPException(status_code=422, detail="Нельзя создать заказ сразу в статусе «отменён»")
     order = PurchaseOrder(
         supplier=payload.supplier,
         supplier_id=payload.supplier_id,
@@ -453,8 +461,8 @@ async def _require_editable_order(session: AsyncSession, order_id: int) -> Purch
     order = await session.get(PurchaseOrder, order_id)
     if order is None:
         raise HTTPException(status_code=404, detail="Заказ не найден")
-    if order.status == RECEIVED_ORDER_STATUS:
-        raise HTTPException(status_code=409, detail="Принятый заказ нельзя редактировать")
+    if order.status in (RECEIVED_ORDER_STATUS, "cancelled"):  # терминальные — состав/шапку не меняем
+        raise HTTPException(status_code=409, detail="Принятый/отменённый заказ нельзя редактировать")
     return order
 
 
@@ -644,6 +652,8 @@ async def supplier_scorecard(supplier_id: int, session: AsyncSession = Depends(g
     claims_by_status = {s: int(c) for s, c in claims}
     claims_total = sum(claims_by_status.values())
     claims_open = claims_total - sum(claims_by_status.get(s, 0) for s in CLAIM_CLOSED_STATUSES)
+    # качество: отклонённые претензии (поставщик не виноват) НЕ снижают балл
+    claims_for_quality = claims_total - claims_by_status.get("rejected", 0)
     avg_price = (
         await session.execute(
             select(func.avg(RfqBid.price_byn)).where(
@@ -651,7 +661,7 @@ async def supplier_scorecard(supplier_id: int, session: AsyncSession = Depends(g
             )
         )
     ).scalar_one_or_none()
-    scoring = _score_components(orders_count, claims_total, on_time_rate=None)
+    scoring = _score_components(orders_count, claims_for_quality, on_time_rate=None)
     return {
         "supplier_id": supplier_id,
         "orders_count": orders_count,
@@ -762,6 +772,8 @@ async def award_rfq(
     rfq = await session.get(Rfq, rfq_id)
     if rfq is None:
         raise HTTPException(status_code=404, detail="Запрос цен не найден")
+    if rfq.status != "open":
+        raise HTTPException(status_code=409, detail="Запрос цен уже закрыт — победитель выбран/отменён")
     bids = await _bids_of(session, rfq_id)
     winner = next((b for b in bids if b.id == payload.bid_id), None)
     if winner is None:

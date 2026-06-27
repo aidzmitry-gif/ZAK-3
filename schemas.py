@@ -4,11 +4,13 @@ from __future__ import annotations
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 # Статус заказа — закрытый набор (опечатка тихо пропустила бы фиксацию landed cost на приёмке).
 # Должен совпадать с ORDER_STATUSES в models.py.
 OrderStatus = Literal["draft", "ordered", "shipped", "customs", "received", "cancelled"]
+# Статус претензии — закрытый набор (свободная строка пропустила бы опечатку мимо событий).
+ClaimStatus = Literal["open", "resolved", "rejected"]
 
 
 class PurchaseRequestCreate(BaseModel):
@@ -53,10 +55,10 @@ class StageUpdate(BaseModel):
 
 class PurchaseOrderLineIn(BaseModel):
     sku_code: str
-    qty: float = 1
-    goods_value_byn: float = 0
-    weight: float = 0
-    volume: float = 0
+    qty: float = Field(1, ge=0)
+    goods_value_byn: float = Field(0, ge=0)
+    weight: float = Field(0, ge=0)
+    volume: float = Field(0, ge=0)
 
 
 class PurchaseOrderLineOut(BaseModel):
@@ -76,7 +78,7 @@ class PurchaseOrderCreate(BaseModel):
     number: str = ""
     status: OrderStatus = "draft"  # новый заказ — черновик до размещения (не «в пути»)
     eta_date: date | None = None
-    freight_byn: float = 0
+    freight_byn: float = Field(0, ge=0)
     lines: list[PurchaseOrderLineIn] = []
 
 
@@ -104,7 +106,7 @@ class PurchaseOrderHeaderUpdate(BaseModel):
     supplier: str | None = None
     supplier_id: int | None = None
     eta_date: date | None = None
-    freight_byn: float | None = None
+    freight_byn: float | None = Field(None, ge=0)
 
 
 # ───────────────────── Предв. себестоимость (Расчёт Китай) ─────────────────────
@@ -113,11 +115,11 @@ class PurchaseOrderHeaderUpdate(BaseModel):
 class CostEstimateLineIn(BaseModel):
     sku_code: str
     path: Literal["cny", "usd"] = "cny"  # валюта поставщика (CNY-путь / USD-путь)
-    price: float  # цена единицы у поставщика в валюте path
-    qty: float = 1
-    weight: float = 0  # кг брутто на единицу
-    duty_pct: float | None = None  # ставка пошлины по ТН ВЭД; None → default_duty_pct
-    util: float = 0  # утильсбор BYN на единицу (техника)
+    price: float = Field(ge=0)  # цена единицы у поставщика в валюте path
+    qty: float = Field(1, ge=0)
+    weight: float = Field(0, ge=0)  # кг брутто на единицу
+    duty_pct: float | None = Field(None, ge=0)  # ставка пошлины по ТН ВЭД; None → default_duty_pct
+    util: float = Field(0, ge=0)  # утильсбор BYN на единицу (техника)
 
 
 class CostRatesIn(BaseModel):
@@ -166,8 +168,8 @@ class SupplierClaimCreate(BaseModel):
     reason: str = ""
     order_code: str = ""
     claim_type: str = ""  # брак / недопоставка / пересорт / срок
-    qty_affected: int = 0
-    amount_byn: float | None = None
+    qty_affected: int = Field(0, ge=0)
+    amount_byn: float | None = Field(None, ge=0)
 
 
 class SupplierClaimOut(BaseModel):
@@ -191,7 +193,7 @@ class SupplierClaimOut(BaseModel):
 class SupplierClaimUpdate(BaseModel):
     supplier: str | None = None
     supplier_id: int | None = None
-    status: str | None = None
+    status: ClaimStatus | None = None
     resolution: str | None = None
 
 
@@ -244,14 +246,14 @@ class SupplierOut(SupplierBase):
 class RfqCreate(BaseModel):
     item: str = ""
     sku_code: str = ""
-    qty: float = 1
+    qty: float = Field(1, ge=0)
     request_id: int | None = None
     due_date: date | None = None
 
 
 class RfqBidIn(BaseModel):
     supplier_id: int | None = None
-    price_byn: float
+    price_byn: float = Field(ge=0)
     lead_time_days: int | None = None
     incoterms: str = ""
     note: str = ""
