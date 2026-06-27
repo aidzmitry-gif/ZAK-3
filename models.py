@@ -5,6 +5,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    Boolean,
     Date,
     DateTime,
     ForeignKey,
@@ -13,6 +14,7 @@ from sqlalchemy import (
     Numeric,
     String,
     UniqueConstraint,
+    false,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -32,7 +34,8 @@ class PurchaseRequest(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     number: Mapped[str] = mapped_column(String(64), default="", server_default="")
-    supplier: Mapped[str] = mapped_column(String(255))
+    supplier: Mapped[str] = mapped_column(String(255))  # легаси-строка (back-compat)
+    supplier_id: Mapped[int | None] = mapped_column(Integer)  # soft-ref на procurement.supplier (приоритетный)
     flag: Mapped[str] = mapped_column(String(8), default="", server_default="")
     item: Mapped[str] = mapped_column(String(255))
     qty: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
@@ -47,40 +50,50 @@ class PurchaseRequest(Base):
 
 class SupplierClaim(Base):
     """Претензия поставщику. Создаётся автоматически при браке в производстве
-    (событие ``production.scrap``) — замыкает цикл ОТК → закупки.
+    (событие ``production.scrap``) ИЛИ вручную закупщиком (``POST /procurement/claims``).
 
-    Поставщик в событии не приходит (дефект найден на сборке, привязку к PO делает
-    закупщик): претензия открывается без поставщика, ``status="open"``; закупщик
-    позже проставляет поставщика и закрывает её через ``PATCH /procurement/claims``.
+    Поставщик в авто-событии не приходит (дефект найден на сборке): претензия открывается
+    без поставщика, ``status="open"``; закупщик проставит поставщика (``supplier_id``) и
+    закроет её через ``PATCH /procurement/claims`` (resolved/rejected → событие).
     """
 
     __tablename__ = "supplier_claim"
     __table_args__ = {"schema": "procurement"}
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    supplier: Mapped[str] = mapped_column(String(255), default="", server_default="")
+    supplier: Mapped[str] = mapped_column(String(255), default="", server_default="")  # легаси-строка
+    supplier_id: Mapped[int | None] = mapped_column(Integer)  # soft-ref на procurement.supplier
     item: Mapped[str] = mapped_column(String(255), default="", server_default="")
     reason: Mapped[str] = mapped_column(String(400), default="", server_default="")
     order_code: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    # тип претензии: брак / недопоставка / пересорт / срок (свободный, не Enum БД)
+    claim_type: Mapped[str] = mapped_column(String(32), default="", server_default="")
+    qty_affected: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    amount_byn: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))  # заявленная сумма претензии
+    resolution: Mapped[str] = mapped_column(String(500), default="", server_default="")  # как урегулировано
     status: Mapped[str] = mapped_column(String(32), default="open", server_default="open")
     source: Mapped[str] = mapped_column(String(32), default="production", server_default="production")
     entity_ref: Mapped[str] = mapped_column(String(128), default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
-# Статусы открытого заказа: размещён → отгружен → таможня → принят. Пока товар не принят
-# (``received``), заказ «открыт» = в пути: sales вычитает его qty в нетто-доступности.
+# Жизненный цикл заказа: draft (черновик, не размещён) → ordered → shipped → customs → received;
+# cancelled — отказ из любого открытого состояния. Открытый заказ (в пути, sales вычитает) —
+# только ordered/shipped/customs (draft/received/cancelled НЕ открыты).
+ORDER_STATUSES = ("draft", "ordered", "shipped", "customs", "received", "cancelled")
 OPEN_ORDER_STATUSES = ("ordered", "shipped", "customs")
 RECEIVED_ORDER_STATUS = "received"
+# ранг для валидации переходов: вперёд (со скипами) можно, назад — нельзя (cancelled — отдельно)
+ORDER_RANK = {"draft": 0, "ordered": 1, "shipped": 2, "customs": 3, "received": 4}
 
 
 class PurchaseOrder(Base):
     """Размещённый заказ поставщику («машина»/контейнер): шапка + позиции по ``sku_code``.
 
     Отделён от воронки ``PurchaseRequest`` (пред-заказный sourcing): ``PurchaseOrder`` —
-    уже размещённый заказ с ETA и сквозным статусом. Открытый заказ (``OPEN_ORDER_STATUSES``)
-    даёт продажам «в пути» по номенклатуре. На приёмке (``received``) общий движок
-    ``allocate_landed_cost`` разносит фрахт/издержки на позиции → строки ``LandedCost`` per-SKU.
+    уже размещённый заказ с ETA и сквозным статусом (``ORDER_STATUSES``). Открытый заказ
+    (``OPEN_ORDER_STATUSES``) даёт продажам «в пути» по номенклатуре. На приёмке (``received``)
+    общий движок ``allocate_landed_cost`` разносит фрахт на позиции → строки ``LandedCost`` per-SKU.
     """
 
     __tablename__ = "purchase_order"
@@ -88,8 +101,9 @@ class PurchaseOrder(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     number: Mapped[str] = mapped_column(String(64), default="", server_default="")
-    supplier: Mapped[str] = mapped_column(String(255), default="", server_default="")
-    status: Mapped[str] = mapped_column(String(16), default="ordered", server_default="ordered")
+    supplier: Mapped[str] = mapped_column(String(255), default="", server_default="")  # легаси-строка
+    supplier_id: Mapped[int | None] = mapped_column(Integer)  # soft-ref на procurement.supplier
+    status: Mapped[str] = mapped_column(String(16), default="draft", server_default="draft")
     eta_date: Mapped[date | None] = mapped_column(Date)  # ожидаемое прибытие (ETA)
     # общий фрахт партии (BYN), разносится на позиции при приёмке (база — вес, иначе стоимость)
     freight_byn: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"), server_default="0")
@@ -150,4 +164,65 @@ class LandedCost(Base):
     fx_rate_basis: Mapped[str | None] = mapped_column(String(8))  # смысл fx_date: po/gtd/payment
     # дата фиксации cost (обновляется при пересчёте) — по ней выбираем «последнюю»
     fixed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class Supplier(Base):
+    """Профиль поставщика закупок: рейтинг/условия/ЛПР. НЕ дубль карточки контрагента —
+    эталон контрагента в MDM ядра; ``unp`` — soft-ref на MDM по УНП (без FK).
+    Здесь живут именно закупочные атрибуты (оплата/срок/incoterms/статус)."""
+
+    __tablename__ = "supplier"
+    __table_args__ = {"schema": "procurement"}
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    unp: Mapped[str] = mapped_column(String(32), default="", server_default="")  # soft-ref на MDM-контрагента
+    country: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    flag: Mapped[str] = mapped_column(String(8), default="", server_default="")
+    contact_person: Mapped[str] = mapped_column(String(128), default="", server_default="")
+    phone: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    email: Mapped[str] = mapped_column(String(128), default="", server_default="")
+    # условия оплаты, напр. «30% предоплата / 70% по факту»
+    payment_terms: Mapped[str] = mapped_column(String(255), default="", server_default="")
+    lead_time_days: Mapped[int | None] = mapped_column(Integer)
+    incoterms: Mapped[str] = mapped_column(String(16), default="", server_default="")
+    status: Mapped[str] = mapped_column(String(16), default="active", server_default="active")  # active/blocked
+    notes: Mapped[str] = mapped_column(String(1000), default="", server_default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class Rfq(Base):
+    """Запрос цен (тендер закупки): по позиции/номенклатуре собираем предложения поставщиков."""
+
+    __tablename__ = "rfq"
+    __table_args__ = {"schema": "procurement"}
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item: Mapped[str] = mapped_column(String(255), default="", server_default="")
+    sku_code: Mapped[str] = mapped_column(String(64), default="", server_default="")  # soft-ref на 1С-код
+    qty: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("1"), server_default="1")
+    request_id: Mapped[int | None] = mapped_column(Integer)  # soft-ref на purchase_request
+    status: Mapped[str] = mapped_column(String(16), default="open", server_default="open")  # open/awarded/cancelled
+    due_date: Mapped[date | None] = mapped_column(Date)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class RfqBid(Base):
+    """Предложение поставщика на запрос цен (RFQ): цена/срок/incoterms; победитель — ``is_winner``."""
+
+    __tablename__ = "rfq_bid"
+    __table_args__ = (
+        Index("ix_rfq_bid_rfq", "rfq_id"),
+        {"schema": "procurement"},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    rfq_id: Mapped[int] = mapped_column(ForeignKey("procurement.rfq.id", ondelete="CASCADE"))
+    supplier_id: Mapped[int | None] = mapped_column(Integer)  # soft-ref на procurement.supplier
+    price_byn: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    lead_time_days: Mapped[int | None] = mapped_column(Integer)
+    incoterms: Mapped[str] = mapped_column(String(16), default="", server_default="")
+    note: Mapped[str] = mapped_column(String(400), default="", server_default="")
+    is_winner: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

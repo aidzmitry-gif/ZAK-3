@@ -7,12 +7,13 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict
 
 # Статус заказа — закрытый набор (опечатка тихо пропустила бы фиксацию landed cost на приёмке).
-# Должен совпадать с OPEN_ORDER_STATUSES + RECEIVED_ORDER_STATUS в models.py.
-OrderStatus = Literal["ordered", "shipped", "customs", "received"]
+# Должен совпадать с ORDER_STATUSES в models.py.
+OrderStatus = Literal["draft", "ordered", "shipped", "customs", "received", "cancelled"]
 
 
 class PurchaseRequestCreate(BaseModel):
     supplier: str
+    supplier_id: int | None = None  # soft-ref на procurement.supplier (приоритетный над строкой)
     flag: str = ""
     item: str
     qty: int = 1
@@ -31,6 +32,7 @@ class PurchaseRequestOut(BaseModel):
     id: int
     number: str
     supplier: str
+    supplier_id: int | None = None
     flag: str = ""
     item: str
     qty: int
@@ -70,8 +72,9 @@ class PurchaseOrderLineOut(BaseModel):
 
 class PurchaseOrderCreate(BaseModel):
     supplier: str = ""
+    supplier_id: int | None = None  # soft-ref на procurement.supplier
     number: str = ""
-    status: OrderStatus = "ordered"
+    status: OrderStatus = "draft"  # новый заказ — черновик до размещения (не «в пути»)
     eta_date: date | None = None
     freight_byn: float = 0
     lines: list[PurchaseOrderLineIn] = []
@@ -83,6 +86,7 @@ class PurchaseOrderOut(BaseModel):
     id: int
     number: str
     supplier: str
+    supplier_id: int | None = None
     status: str
     eta_date: date | None = None
     freight_byn: float
@@ -143,14 +147,32 @@ class CostEstimateOut(BaseModel):
 # ───────────────────────── Претензии поставщикам ─────────────────────────
 
 
+class SupplierClaimCreate(BaseModel):
+    """Ручное заведение претензии закупщиком (не из брака производства)."""
+
+    supplier: str = ""
+    supplier_id: int | None = None
+    item: str = ""
+    reason: str = ""
+    order_code: str = ""
+    claim_type: str = ""  # брак / недопоставка / пересорт / срок
+    qty_affected: int = 0
+    amount_byn: float | None = None
+
+
 class SupplierClaimOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     supplier: str = ""
+    supplier_id: int | None = None
     item: str = ""
     reason: str = ""
     order_code: str = ""
+    claim_type: str = ""
+    qty_affected: int = 0
+    amount_byn: float | None = None
+    resolution: str = ""
     status: str
     source: str
     entity_ref: str = ""
@@ -158,4 +180,99 @@ class SupplierClaimOut(BaseModel):
 
 class SupplierClaimUpdate(BaseModel):
     supplier: str | None = None
+    supplier_id: int | None = None
     status: str | None = None
+    resolution: str | None = None
+
+
+# ───────────────────────── Справочник поставщиков (Supplier) ─────────────────────────
+
+
+class SupplierBase(BaseModel):
+    name: str
+    unp: str = ""  # soft-ref на MDM-контрагента (провенанс)
+    country: str = ""
+    flag: str = ""
+    contact_person: str = ""
+    phone: str = ""
+    email: str = ""
+    payment_terms: str = ""
+    lead_time_days: int | None = None
+    incoterms: str = ""
+    status: str = "active"  # active / blocked
+    notes: str = ""
+
+
+class SupplierCreate(SupplierBase):
+    pass
+
+
+class SupplierUpdate(BaseModel):
+    name: str | None = None
+    unp: str | None = None
+    country: str | None = None
+    flag: str | None = None
+    contact_person: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    payment_terms: str | None = None
+    lead_time_days: int | None = None
+    incoterms: str | None = None
+    status: str | None = None
+    notes: str | None = None
+
+
+class SupplierOut(SupplierBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+
+
+# ───────────────────────── RFQ / тендер закупки ─────────────────────────
+
+
+class RfqCreate(BaseModel):
+    item: str = ""
+    sku_code: str = ""
+    qty: float = 1
+    request_id: int | None = None
+    due_date: date | None = None
+
+
+class RfqBidIn(BaseModel):
+    supplier_id: int | None = None
+    price_byn: float
+    lead_time_days: int | None = None
+    incoterms: str = ""
+    note: str = ""
+
+
+class RfqBidOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    rfq_id: int
+    supplier_id: int | None = None
+    price_byn: float
+    lead_time_days: int | None = None
+    incoterms: str = ""
+    note: str = ""
+    is_winner: bool = False
+
+
+class RfqOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    item: str = ""
+    sku_code: str = ""
+    qty: float
+    request_id: int | None = None
+    status: str
+    due_date: date | None = None
+    bids: list[RfqBidOut] = []
+    best_bid_id: int | None = None  # bid с минимальной ценой (для подсветки лучшей)
+
+
+class RfqAward(BaseModel):
+    bid_id: int
