@@ -3,7 +3,7 @@
 **Тип:** git submodule → ZAK-3 (правка = коммит в этот репозиторий)
 **API-префикс:** `/procurement`
 **Схема БД:** `procurement`
-**Статус:** частично наполнен (CRUD/воронка закупок + претензии поставщикам с автосозданием из брака производства + landed cost наружу через фасад ядра; без workflow/permissions)
+**Статус:** наполнен (воронка закупок; справочник поставщиков + scorecard; RFQ/тендер; заказы PO с машиной состояний, ETA, приходом на склад по позициям; landed cost наружу через фасад + предв. себес «Расчёт Китай»; претензии авто+ручные; без workflow/permissions)
 
 ## Назначение
 Управление закупками (sourcing): ведение заявок на закупку по канбан-воронке от
@@ -13,8 +13,8 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
 
 ## Файлы
 - `module.py` — `ProcurementModule(ModuleContract)` + фабрика `get_module()`; регистрация роутера, подписки `production.scrap`, виджета и **фасада себестоимости** (`core.services.landed_cost = LandedCostService()`).
-- `models.py` — ORM-модели `PurchaseRequest`, `SupplierClaim`, `PurchaseOrder`, `PurchaseOrderLine`, `LandedCost` (схема `procurement`).
-- `schemas.py` — Pydantic-схемы: `PurchaseRequestCreate/Out`, `StageUpdate`, `PurchaseOrderCreate/Out`, `PurchaseOrderLineIn/Out`, `PurchaseOrderStatusUpdate`, `SupplierClaimOut`, `SupplierClaimUpdate`.
+- `models.py` — ORM-модели `PurchaseRequest`, `SupplierClaim`, `PurchaseOrder`, `PurchaseOrderLine`, `LandedCost`, `Supplier`, `Rfq`, `RfqBid` (схема `procurement`) + константы статусов заказа (`ORDER_STATUSES`/`OPEN_ORDER_STATUSES`/`RECEIVED_ORDER_STATUS`/`ORDER_RANK`).
+- `schemas.py` — Pydantic-схемы воронки/заказа/позиций/претензий + `Supplier{Create,Update,Out}`, `Rfq{Create,Out}`/`RfqBid{In,Out}`/`RfqAward`, `SupplierClaimCreate`, `PurchaseOrderHeaderUpdate`, `CostEstimate*`.
 - `landed_cost.py` — `LandedCostService` (реализация `core.services.landed_cost.LandedCostGateway`): чтение последней себестоимости по `sku_code` (+ батч).
 - `cost_estimate.py` — `estimate_china_cost` (чистая функция): предв. себестоимость импорта (Китай) per-line — цена+комиссия+страховка+фрахт+пошлина → landed BYN/шт (буфер курса ≥10%). НЕ дубль `allocate_landed_cost` (тот — распределение факт-издержек на приёмке).
 - `events.py` — обработчик `on_production_scrap` (брак производства → претензия поставщику).
@@ -30,13 +30,21 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
 - Workflow / permissions / roles / telegram — **не регистрируются**.
 
 ## События
-- **Публикует** (emit): `procurement.received` — при PATCH-смене стадии на `qc` (приёмка/QC).
-  payload: `{item, qty, warehouse: "Главный", entity_ref: "purchase:<id>"}`. Предназначено для wms (приход на склад).
-- **Публикует** (emit): `procurement.landed_cost.calculated` — на приёмке заказа (`received`), по
-  каждой номенклатуре. payload: `{sku_code, unit_landed_cost_byn (str), qty (str), total_landed_byn
-  (str), shipment_id, stage, purchase_order_id, fx_rate, fx_date, fx_rate_basis,
-  entity_ref:"purchase_order:<id>"}`. Push-инвалидация снапшота себестоимости в sales (пересчёт
-  маржи) + landed-маржа в finance (unit×qty). Потребители: sales (снапшот) + finance (маржа) — позже.
+- **Публикует** (emit): `procurement.received` — (1) при PATCH-смене **стадии воронки** на `qc`,
+  payload `{item, qty, warehouse, entity_ref:"purchase:<id>"}`; (2) при приёмке **заказа** (`received`)
+  ПО КАЖДОЙ позиции, payload `{sku_code, qty (float), warehouse:"Главный", entity_ref:
+  "purchase_order:<id>:<line_id>", unit_landed_cost_byn (str)}`. Для wms (приход на склад; sku из `sku_code`/`item`).
+- **Публикует** (emit): `procurement.landed_cost.calculated` — на приёмке заказа, по каждой
+  номенклатуре. payload: `{sku_code, unit_landed_cost_byn (str), qty (str), total_landed_byn (str),
+  shipment_id, stage, purchase_order_id, fx_*, entity_ref:"purchase_order:<id>"}`. Push для sales
+  (снапшот себестоимости) + finance (landed-маржа unit×qty).
+- **Публикует** (emit): `procurement.order.status_changed` — на каждом переходе статуса заказа.
+  payload: `{order_id, number, from, to, supplier_id}`.
+- **Публикует** (emit): `procurement.rfq.awarded` — при выборе победителя тендера.
+  payload: `{rfq_id, supplier_id, price_byn (str), sku_code, entity_ref:"rfq:<id>"}`.
+- **Публикует** (emit): `procurement.claim.resolved` — при закрытии претензии (resolved/rejected).
+  payload: `{claim_id, supplier_id, claim_type, amount_byn (str|None), resolution, status,
+  entity_ref:"claim:<id>"}`. Для finance/качества.
 - **Подписан на** (subscribe): `production.scrap` (брак в ОТК производства) → `on_production_scrap`
   открывает претензию поставщику (`SupplierClaim`, `status="open"`, поставщик пуст). Обработчик с
   `(payload, ctx)`: пишет в сессию relay, **коммит делает relay**, не обработчик.
@@ -53,11 +61,13 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
   - `stage` — строка, значения из `STAGES`: `need` → `sourcing` → `nego` → `analysis` →
     `approval` → `po` → `supply` → `qc` → `done`. Это **не** Enum БД, просто String(32).
 - **`purchase_order`** (`PurchaseOrder`) — размещённый заказ поставщику («машина»/контейнер):
-  - `id` (PK), `number` (авто `PO-2026-NNNN`), `supplier`, `status` (str≤16: `ordered`→`shipped`
-    →`customs`→`received`), `eta_date` (Date|None — ETA), `freight_byn` (Numeric(14,2) — общий
-    фрахт партии, разносится на позиции), `created_at`.
-  - **Открытый** заказ (`OPEN_ORDER_STATUSES = ordered/shipped/customs`) = товар в пути → sales
-    вычитает в нетто-доступности. Приёмка (`RECEIVED_ORDER_STATUS = received`) фиксирует landed cost.
+  - `id` (PK), `number` (авто `PO-2026-NNNN`), `supplier` (легаси-строка), `supplier_id` (int|None,
+    soft-ref на `supplier`), `status` (str≤16, def `draft`), `eta_date` (Date|None — ETA),
+    `freight_byn` (Numeric(14,2)), `created_at`.
+  - **Машина состояний** `ORDER_RANK`: `draft`→`ordered`→`shipped`→`customs`→`received` (+`cancelled`).
+    Вперёд (со скипами) можно, назад — 422; отмена из открытых, не из принятого (409). Валидирует
+    `_validate_transition`. **Открытый** (`OPEN_ORDER_STATUSES = ordered/shipped/customs`) = в пути →
+    sales вычитает в нетто-доступности (draft/received/cancelled — НЕ открыт). `received` фиксирует landed cost.
 - **`purchase_order_line`** (`PurchaseOrderLine`) — позиция заказа:
   - `id` (PK), `order_id` (FK → `purchase_order.id`, `ondelete=CASCADE`), `sku_code` (soft-ref),
     `qty` (Numeric(14,2)), `goods_value_byn` (Numeric(14,2) — стоимость товара позиции),
@@ -73,11 +83,24 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
   - Фиксируется на приёмке заказа через `_fixate_landed_cost`: агрегирует позиции по `sku_code`,
     разносит `freight_byn` (общий движок `allocate_landed_cost`, база — вес, иначе стоимость) →
     одна строка на номенклатуру, `stage="estimated"`. Пошлина ТН ВЭД / два FX / буфер +10% — Горизонт 2.
-- **`supplier_claim`** (`SupplierClaim`) — претензия поставщику (миграция `0033`):
-  - `id` (PK), `supplier` (str, пусто пока закупщик не привяжет), `item`, `reason`, `order_code`,
-    `status` (str: `open` → `resolved`/`rejected`), `source` (str, `production` для авто-претензий брака),
-    `entity_ref` (напр. `production:qc:<id>`), `created_at` (server_default now()).
-  - Создаётся автоматически обработчиком `on_production_scrap` при браке в ОТК производства.
+- **`supplier_claim`** (`SupplierClaim`) — претензия поставщику:
+  - `id` (PK), `supplier` (легаси-строка), `supplier_id` (int|None, soft-ref), `item`, `reason`,
+    `order_code`, `claim_type` (брак/недопоставка/пересорт/срок), `qty_affected` (int),
+    `amount_byn` (Numeric|None — заявленная сумма), `resolution` (str — как урегулировано),
+    `status` (`open`→`resolved`/`rejected`), `source` (`production` авто / `manual` ручная),
+    `entity_ref`, `created_at`.
+  - Создаётся авто (`on_production_scrap` при браке в ОТК) ИЛИ вручную (`POST /claims`).
+- **`supplier`** (`Supplier`) — профиль поставщика закупок (НЕ дубль контрагента, эталон в MDM):
+  - `id` (PK), `name`, `unp` (soft-ref на MDM-контрагента, провенанс), `country`/`flag`,
+    `contact_person`/`phone`/`email`, `payment_terms`, `lead_time_days` (int|None), `incoterms`,
+    `status` (active/blocked), `notes`, `created_at`.
+- **`rfq`** (`Rfq`) — запрос цен/тендер: `id`, `item`, `sku_code` (soft-ref), `qty`, `request_id`
+  (soft-ref на purchase_request), `status` (open/awarded/cancelled), `due_date`, `created_at`.
+- **`rfq_bid`** (`RfqBid`) — предложение поставщика: `id`, `rfq_id` (FK → rfq, CASCADE),
+  `supplier_id` (soft-ref), `price_byn`, `lead_time_days`, `incoterms`, `note`, `is_winner` (bool),
+  `created_at`. Индекс `ix_rfq_bid_rfq (rfq_id)`.
+- **`purchase_request`** также получил `supplier_id` (int|None, soft-ref, приоритетный над строкой `supplier`).
+- Схема таблиц `supplier`/`rfq`/`rfq_bid` + колонки `supplier_id`/поля претензий + PO default `draft` — миграция `0065`.
 
 ## API-эндпоинты (ключевые)
 - `GET /procurement/requests` — плоский список заявок (сортировка по `id` desc), `list[PurchaseRequestOut]`.
@@ -87,10 +110,22 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
 - `POST /procurement/orders` — создать заказ с позициями (201); номер `PO-2026-NNNN`, если не задан.
 - `GET /procurement/orders` — все заказы с позициями (новые первыми, `list[PurchaseOrderOut]`).
 - `GET /procurement/open-orders` — открытые заказы (статусы `ordered`/`shipped`/`customs`) с ETA и позициями, ближайший ETA первым — для расчёта «в пути» в sales.
-- `PATCH /procurement/orders/{order_id}` — сменить статус; при **фактической** приёмке (`received`) фиксирует landed cost по позициям + эмитит `procurement.landed_cost.calculated` (404 если не найден). Повторная приёмка — без дубля (upsert).
-- `POST /procurement/cost-estimate` — предв. себестоимость импорта (Китай) по позициям: вход `{rates, lines[]}` → `{lines[{…, unit_landed_cost_byn}], total_landed_byn}`. Чистый расчёт без БД (для калькулятора сделки/машины); цена/наценка/НДС НЕ считаются (полоса «Маржа»).
-- `GET /procurement/claims` — претензии поставщикам (`list[SupplierClaimOut]`, новые первыми).
-- `PATCH /procurement/claims/{claim_id}` — назначить поставщика / сменить статус (`SupplierClaimUpdate`; 404 если не найдена).
+- `GET /procurement/orders/{order_id}` — один заказ с позициями (для редактора машины).
+- `PATCH /procurement/orders/{order_id}` — сменить статус по машине состояний (422 на откат назад /
+  недопустимый, 409 на отмену принятого); эмит `procurement.order.status_changed`; при **фактической**
+  приёмке (`received`) фиксирует landed cost + эмитит `landed_cost.calculated` + `procurement.received` по позициям.
+- `PATCH /procurement/orders/{order_id}/header` — править шапку (фрахт/ETA/поставщик); 409 на принятом.
+- `POST /procurement/orders/{order_id}/lines` / `DELETE …/lines/{line_id}` — добавить/убрать позицию (редактор машины; 409 на принятом).
+- `GET /procurement/orders/{order_id}/landed-preview` — предпросмотр распределения landed cost БЕЗ фиксации (live-пересчёт; reuse `allocate_landed_cost`).
+- `POST /procurement/cost-estimate` — предв. себестоимость импорта (Китай) по позициям; чистый расчёт без БД; цена/наценка/НДС НЕ считаются (полоса «Маржа»).
+- `GET/POST /procurement/suppliers`, `GET/PATCH /procurement/suppliers/{id}` — справочник поставщиков (CRUD; 404).
+- `GET /procurement/suppliers/{id}/scorecard` — балл поставщика 0–10 (заказы/претензии/выигранные RFQ; своевременность honest-empty).
+- `GET/POST /procurement/rfq`, `GET /procurement/rfq/{id}` — тендер (предложения сортированы по цене, `best_bid_id`).
+- `POST /procurement/rfq/{id}/bids` — предложение поставщика (409 если RFQ закрыт).
+- `POST /procurement/rfq/{id}/award` — выбрать победителя (`is_winner`, status=awarded, эмит `rfq.awarded`).
+- `GET /procurement/claims` — претензии (`list[SupplierClaimOut]`, новые первыми).
+- `POST /procurement/claims` — ручное заведение претензии (source=manual).
+- `PATCH /procurement/claims/{claim_id}` — назначить поставщика / урегулировать; при resolved/rejected — эмит `claim.resolved` (404 если не найдена).
 
 ## Межмодульные связи и зависимости
 - **procurement → wms:** событие `procurement.received` (приход на склад). Прямых вызовов других модулей нет.
@@ -106,12 +141,15 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
   `flush` → присваивает авто-`number` (`ЗАК-2026-{id:04d}`) → второй commit. PATCH тоже коммитит сам.
 - `RECEIVED_STAGE = "qc"` (константа в `routes.py`): именно эта стадия = физический приём
   товара и триггер прихода на склад, а не финальная `done`.
-- В `_to_card` «Supplier Score 8.7» — захардкоженная заглушка, показывается только на стадиях `nego`/`analysis`.
+- В `_to_card` балл поставщика — **реальный** (`_board_scores`: по заказам/претензиям через `supplier_id`),
+  пусто если поставщик не связан или нет данных. Своевременность пока не входит (нет дат факта приёмки).
 - `amount` в схемах — `float`, но в модели `Numeric`; в POST приводится `Decimal(str(...))`.
-- **`PurchaseOrder` ≠ `PurchaseRequest`:** воронка (`PurchaseRequest`) — пред-заказный sourcing;
-  заказ (`PurchaseOrder`) — уже размещённый, с позициями/ETA/статусом. Связи между ними пока нет
-  (плоско). Приёмка заказа (`received`) НЕ эмитит `procurement.received` в WMS — это делает воронка
-  (`qc`); сшивка PO→WMS-приход (эмит по позициям) — Горизонт 2, согласовать со Складом.
+- **`PurchaseOrder` ≠ `PurchaseRequest`:** воронка — пред-заказный sourcing; заказ — уже размещённый,
+  с позициями/ETA/статусом. Связи между ними пока нет (плоско). **Оба** эмитят `procurement.received` в
+  WMS: воронка на `qc` (одной строкой), заказ на `received` (по каждой позиции) — следить, чтобы один
+  физический приход не задвоился (если PR и PO ведут один товар — принимать в одном из путей).
+- **Скоркарта**: своевременность/цена — honest-empty (нет дат факта приёмки заказа / нет эталона цены);
+  балл = взвешенное среднее доступных компонент (сейчас только quality). `# ponytail:` веса захардкожены.
 - **landed cost — мин.срез:** позиция без `sku_code` или с `qty<=0` пропускается (себестоимость
   единицы не определена — не пишем `unit=0`, чтобы не замаскировать дыру в марже); издержки = только `freight_byn`
   (база — вес, иначе стоимость). Пошлина по ТН ВЭД, два FX-курса и буфер +10% (методика «Расчёт
