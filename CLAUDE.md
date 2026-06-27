@@ -16,6 +16,7 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
 - `models.py` — ORM-модели `PurchaseRequest`, `SupplierClaim`, `PurchaseOrder`, `PurchaseOrderLine`, `LandedCost` (схема `procurement`).
 - `schemas.py` — Pydantic-схемы: `PurchaseRequestCreate/Out`, `StageUpdate`, `PurchaseOrderCreate/Out`, `PurchaseOrderLineIn/Out`, `PurchaseOrderStatusUpdate`, `SupplierClaimOut`, `SupplierClaimUpdate`.
 - `landed_cost.py` — `LandedCostService` (реализация `core.services.landed_cost.LandedCostGateway`): чтение последней себестоимости по `sku_code` (+ батч).
+- `cost_estimate.py` — `estimate_china_cost` (чистая функция): предв. себестоимость импорта (Китай) per-line — цена+комиссия+страховка+фрахт+пошлина → landed BYN/шт (буфер курса ≥10%). НЕ дубль `allocate_landed_cost` (тот — распределение факт-издержек на приёмке).
 - `events.py` — обработчик `on_production_scrap` (брак производства → претензия поставщику).
 - `routes.py` — HTTP-API под `/procurement` + маппинг строки в `FunnelCard` + фиксация landed cost по позициям на приёмке заказа (`_fixate_landed_cost`).
 - `stages.py` — список стадий воронки `STAGES` (id/title/color, порядок = колонки канбана).
@@ -31,6 +32,10 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
 ## События
 - **Публикует** (emit): `procurement.received` — при PATCH-смене стадии на `qc` (приёмка/QC).
   payload: `{item, qty, warehouse: "Главный", entity_ref: "purchase:<id>"}`. Предназначено для wms (приход на склад).
+- **Публикует** (emit): `procurement.landed_cost.calculated` — на приёмке заказа (`received`), по
+  каждой номенклатуре. payload: `{sku_code, unit_landed_cost_byn (str), shipment_id, stage,
+  purchase_order_id, fx_rate, fx_date, fx_rate_basis, entity_ref:"purchase_order:<id>"}`. Push-
+  инвалидация снапшота себестоимости в sales (пересчёт маржи). Подписчиков пока нет (sales — позже).
 - **Подписан на** (subscribe): `production.scrap` (брак в ОТК производства) → `on_production_scrap`
   открывает претензию поставщику (`SupplierClaim`, `status="open"`, поставщик пуст). Обработчик с
   `(payload, ctx)`: пишет в сессию relay, **коммит делает relay**, не обработчик.
@@ -81,7 +86,8 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
 - `POST /procurement/orders` — создать заказ с позициями (201); номер `PO-2026-NNNN`, если не задан.
 - `GET /procurement/orders` — все заказы с позициями (новые первыми, `list[PurchaseOrderOut]`).
 - `GET /procurement/open-orders` — открытые заказы (статусы `ordered`/`shipped`/`customs`) с ETA и позициями, ближайший ETA первым — для расчёта «в пути» в sales.
-- `PATCH /procurement/orders/{order_id}` — сменить статус; при **фактической** приёмке (`received`) фиксирует landed cost по позициям (404 если не найден). Повторная приёмка — без дубля (upsert).
+- `PATCH /procurement/orders/{order_id}` — сменить статус; при **фактической** приёмке (`received`) фиксирует landed cost по позициям + эмитит `procurement.landed_cost.calculated` (404 если не найден). Повторная приёмка — без дубля (upsert).
+- `POST /procurement/cost-estimate` — предв. себестоимость импорта (Китай) по позициям: вход `{rates, lines[]}` → `{lines[{…, unit_landed_cost_byn}], total_landed_byn}`. Чистый расчёт без БД (для калькулятора сделки/машины); цена/наценка/НДС НЕ считаются (полоса «Маржа»).
 - `GET /procurement/claims` — претензии поставщикам (`list[SupplierClaimOut]`, новые первыми).
 - `PATCH /procurement/claims/{claim_id}` — назначить поставщика / сменить статус (`SupplierClaimUpdate`; 404 если не найдена).
 

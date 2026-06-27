@@ -11,6 +11,7 @@ from core.runtime.core import Core
 from core.runtime.deps import get_core, get_session
 from core.runtime.funnel import FunnelBoardOut, FunnelCard, build_board
 from core.services.landed_cost import LandedExpense, LandedLine, allocate_landed_cost
+from modules.procurement.cost_estimate import CostLine, CostRates, estimate_china_cost
 from modules.procurement.models import (
     OPEN_ORDER_STATUSES,
     RECEIVED_ORDER_STATUS,
@@ -21,6 +22,8 @@ from modules.procurement.models import (
     SupplierClaim,
 )
 from modules.procurement.schemas import (
+    CostEstimateOut,
+    CostEstimateRequest,
     PurchaseOrderCreate,
     PurchaseOrderLineOut,
     PurchaseOrderOut,
@@ -152,10 +155,12 @@ async def _orders_out(session: AsyncSession, orders: list[PurchaseOrder]) -> lis
     ]
 
 
-async def _fixate_landed_cost(session: AsyncSession, order: PurchaseOrder) -> None:
+async def _fixate_landed_cost(session: AsyncSession, order: PurchaseOrder, event_bus) -> None:
     """На приёмке (``received``) разнести фрахт заказа на позиции и зафиксировать
     себестоимость единицы per-SKU через общий движок ``allocate_landed_cost`` (не второй
-    расчёт). Upsert по (sku_code, заказ): повторная приёмка не плодит дубль.
+    расчёт). Upsert по (sku_code, заказ): повторная приёмка не плодит дубль. По каждой
+    зафиксированной номенклатуре эмитит ``procurement.landed_cost.calculated`` (push-
+    инвалидация снапшота себестоимости в sales → пересчёт маржи).
 
     Позиции с одинаковым ``sku_code`` агрегируем в одну (одна строка ``LandedCost`` на
     номенклатуру). Мин.срез: издержки = только фрахт; пошлина по ТН ВЭД, два FX-курса и
@@ -218,6 +223,23 @@ async def _fixate_landed_cost(session: AsyncSession, order: PurchaseOrder) -> No
                     stage="estimated",
                 )
             )
+        # push-инвалидация для sales: себестоимость по номенклатуре пересчитана (§8).
+        # payload — JSON-safe (Decimal→str); подписчиков пока нет (sales подпишется позже).
+        event_bus.emit(
+            session,
+            "procurement.landed_cost.calculated",
+            {
+                "sku_code": code,
+                "unit_landed_cost_byn": str(unit),
+                "shipment_id": shipment_id,
+                "stage": "estimated",
+                "purchase_order_id": order.id,
+                "fx_rate": None,
+                "fx_date": None,
+                "fx_rate_basis": None,
+                "entity_ref": f"purchase_order:{order.id}",
+            },
+        )
 
 
 @router.get("/orders", response_model=list[PurchaseOrderOut])
@@ -246,7 +268,9 @@ async def open_orders(session: AsyncSession = Depends(get_session)):
 
 @router.post("/orders", response_model=PurchaseOrderOut, status_code=201)
 async def create_order(
-    payload: PurchaseOrderCreate, session: AsyncSession = Depends(get_session)
+    payload: PurchaseOrderCreate,
+    core: Core = Depends(get_core),
+    session: AsyncSession = Depends(get_session),
 ):
     """Создать заказ поставщику с позициями. Номер генерируется, если не задан."""
     order = PurchaseOrder(
@@ -273,7 +297,7 @@ async def create_order(
         )
     if order.status == RECEIVED_ORDER_STATUS:  # создан сразу принятым — зафиксировать cost
         await session.flush()
-        await _fixate_landed_cost(session, order)
+        await _fixate_landed_cost(session, order, core.event_bus)
     await session.commit()
     await session.refresh(order)
     return (await _orders_out(session, [order]))[0]
@@ -283,6 +307,7 @@ async def create_order(
 async def update_order_status(
     order_id: int,
     payload: PurchaseOrderStatusUpdate,
+    core: Core = Depends(get_core),
     session: AsyncSession = Depends(get_session),
 ):
     """Сменить статус заказа. При фактической приёмке (``received``) — зафиксировать
@@ -295,10 +320,48 @@ async def update_order_status(
     )
     order.status = payload.status
     if entering_received:
-        await _fixate_landed_cost(session, order)
+        await _fixate_landed_cost(session, order, core.event_bus)
     await session.commit()
     await session.refresh(order)
     return (await _orders_out(session, [order]))[0]
+
+
+# ───────────────────── Предв. себестоимость (Расчёт Китай) ─────────────────────
+
+
+@router.post("/cost-estimate", response_model=CostEstimateOut)
+async def cost_estimate(payload: CostEstimateRequest):
+    """Предварительная (плановая) себестоимость импорта из Китая по позициям сделки/машины.
+
+    Чистый расчёт без БД: цена поставщика + комиссия + страховка + фрахт + пошлина → landed
+    cost BYN/шт (буфер курса ≥10%). Граница с продажами — ``unit_landed_cost_byn``; цена/наценка
+    /НДС тут НЕ считаются (полоса «Маржа/ценообразование»). Ставка пошлины — на вход (авто-резолв
+    из ``ref_tnved`` — Горизонт 2)."""
+    r = payload.rates
+    rates = CostRates(
+        usd_byn=Decimal(str(r.usd_byn)),
+        cny_rub=Decimal(str(r.cny_rub)),
+        rub_byn=Decimal(str(r.rub_byn)),
+        usd_rub=Decimal(str(r.usd_rub)),
+        commission_pct=Decimal(str(r.commission_pct)),
+        insurance_pct=Decimal(str(r.insurance_pct)),
+        freight_usd_per_kg=Decimal(str(r.freight_usd_per_kg)),
+        default_duty_pct=Decimal(str(r.default_duty_pct)),
+        fx_buffer_pct=Decimal(str(r.fx_buffer_pct)),
+    )
+    lines = [
+        CostLine(
+            sku_code=ln.sku_code,
+            path=ln.path,
+            price=Decimal(str(ln.price)),
+            qty=Decimal(str(ln.qty)),
+            weight=Decimal(str(ln.weight)),
+            duty_pct=None if ln.duty_pct is None else Decimal(str(ln.duty_pct)),
+            util=Decimal(str(ln.util)),
+        )
+        for ln in payload.lines
+    ]
+    return estimate_china_cost(lines, rates)
 
 
 # ───────────────────────── Претензии поставщикам ─────────────────────────

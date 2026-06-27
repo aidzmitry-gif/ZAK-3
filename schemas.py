@@ -93,6 +93,50 @@ class PurchaseOrderStatusUpdate(BaseModel):
     status: OrderStatus
 
 
+# ───────────────────── Предв. себестоимость (Расчёт Китай) ─────────────────────
+
+
+class CostEstimateLineIn(BaseModel):
+    sku_code: str
+    path: Literal["cny", "usd"] = "cny"  # валюта поставщика (CNY-путь / USD-путь)
+    price: float  # цена единицы у поставщика в валюте path
+    qty: float = 1
+    weight: float = 0  # кг брутто на единицу
+    duty_pct: float | None = None  # ставка пошлины по ТН ВЭД; None → default_duty_pct
+    util: float = 0  # утильсбор BYN на единицу (техника)
+
+
+class CostRatesIn(BaseModel):
+    usd_byn: float
+    cny_rub: float
+    rub_byn: float
+    usd_rub: float
+    commission_pct: float = 0
+    insurance_pct: float = 0
+    freight_usd_per_kg: float = 0
+    default_duty_pct: float = 0
+    fx_buffer_pct: float = 10  # буфер курса, мин. 10 (защита прибыли от колебаний)
+
+
+class CostEstimateRequest(BaseModel):
+    lines: list[CostEstimateLineIn]
+    rates: CostRatesIn
+
+
+class CostEstimateLineOut(BaseModel):
+    sku_code: str
+    goods_byn: float
+    freight_byn: float
+    duty_byn: float
+    util_byn: float
+    unit_landed_cost_byn: float
+
+
+class CostEstimateOut(BaseModel):
+    lines: list[CostEstimateLineOut]
+    total_landed_byn: float
+
+
 # ───────────────────────── Претензии поставщикам ─────────────────────────
 
 
