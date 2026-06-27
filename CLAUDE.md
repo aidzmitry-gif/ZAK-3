@@ -33,9 +33,10 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
 - **Публикует** (emit): `procurement.received` — при PATCH-смене стадии на `qc` (приёмка/QC).
   payload: `{item, qty, warehouse: "Главный", entity_ref: "purchase:<id>"}`. Предназначено для wms (приход на склад).
 - **Публикует** (emit): `procurement.landed_cost.calculated` — на приёмке заказа (`received`), по
-  каждой номенклатуре. payload: `{sku_code, unit_landed_cost_byn (str), shipment_id, stage,
-  purchase_order_id, fx_rate, fx_date, fx_rate_basis, entity_ref:"purchase_order:<id>"}`. Push-
-  инвалидация снапшота себестоимости в sales (пересчёт маржи). Подписчиков пока нет (sales — позже).
+  каждой номенклатуре. payload: `{sku_code, unit_landed_cost_byn (str), qty (str), total_landed_byn
+  (str), shipment_id, stage, purchase_order_id, fx_rate, fx_date, fx_rate_basis,
+  entity_ref:"purchase_order:<id>"}`. Push-инвалидация снапшота себестоимости в sales (пересчёт
+  маржи) + landed-маржа в finance (unit×qty). Потребители: sales (снапшот) + finance (маржа) — позже.
 - **Подписан на** (subscribe): `production.scrap` (брак в ОТК производства) → `on_production_scrap`
   открывает претензию поставщику (`SupplierClaim`, `status="open"`, поставщик пуст). Обработчик с
   `(payload, ctx)`: пишет в сессию relay, **коммит делает relay**, не обработчик.

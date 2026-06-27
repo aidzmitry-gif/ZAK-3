@@ -231,6 +231,9 @@ async def _fixate_landed_cost(session: AsyncSession, order: PurchaseOrder, event
             {
                 "sku_code": code,
                 "unit_landed_cost_byn": str(unit),
+                # qty + итог по позиции — Финансам для landed-маржи (unit×qty или total)
+                "qty": str(agg[code]["qty"]),
+                "total_landed_byn": str(r["landed_total"]),
                 "shipment_id": shipment_id,
                 "stage": "estimated",
                 "purchase_order_id": order.id,
