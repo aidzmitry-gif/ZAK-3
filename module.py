@@ -20,6 +20,10 @@ class ProcurementModule(ModuleContract):
         core.subscribe("wms.stock.low", events.on_stock_low)
         # срок отгрузки клиенту из продаж → требования к плану машины (sales → procurement)
         core.subscribe("sales.deal.ship_deadline.set", events.on_ship_deadline_set)
+        # смена справочников (пошлина ТН ВЭД / мастер-поля SKU) → пересчёт плановой landed
+        # (reference → procurement, круг 4 B2; шина без wildcard — подписка по конкретным типам)
+        core.subscribe("reference.ref_tnved.changed", events.on_reference_changed)
+        core.subscribe("reference.sku.changed", events.on_reference_changed)
         core.register_widget(Widget("procurement", "Закупки", source="procurement.requests"))
         # себестоимость партии наружу — sales читает через фасад для расчёта маржи (§6)
         core.services.landed_cost = LandedCostService()

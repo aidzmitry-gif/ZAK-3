@@ -133,3 +133,58 @@ async def on_ship_deadline_set(payload: dict, ctx) -> None:
         "Procurement: срок клиента по сделке %s → %s (%d поз.)",
         payload.get("number"), raw, len(seen),
     )
+
+
+async def _affected_skus(session, ref_key: str, key: str) -> list[str]:
+    """Коды SKU, затронутые сменой справочника: ``core.skus`` → сам товар; ``core.tnved`` → товары
+    с этим (своим) кодом ТН ВЭД. Групповое наследование ТН ВЭД — отложенный каскад (# ponytail:
+    резолв через группы номенклатуры, если понадобится точность по наследованию)."""
+    from sqlalchemy import select
+
+    from core.domain.models import Sku
+
+    if ref_key == "core.skus":
+        return [key]
+    if ref_key == "core.tnved":
+        return list(
+            (await session.execute(select(Sku.code).where(Sku.tnved_code == key))).scalars().all()
+        )
+    return []
+
+
+async def on_reference_changed(payload: dict, ctx) -> None:
+    """Смена справочной ставки/мастер-поля SKU → пересчёт плановой landed затронутых товаров
+    (reference → procurement, REF3-7 / круг 4 B2).
+
+    Шина без wildcard, поэтому подписка на КОНКРЕТНЫЕ события: ``reference.ref_tnved.changed``
+    (пошлина) и ``reference.sku.changed`` (мастер-поля товара). НДС/курс — доля Финансов (НДС
+    возвратный — не входит в landed; товар заказа уже в BYN — курс не двигает BYN-landed).
+
+    ⚠️ Дебаунс против каскада: массовая правка справочника = шквал событий. В пределах одного
+    прохода relay каждый SKU пересчитываем не более раза — кэш на ``ctx`` (relay переиспользует
+    один ``EventContext`` на весь батч). Коммит делает relay, не обработчик (§2.5).
+    """
+    if ctx is None:
+        return
+    ref_key = payload.get("ref_key") or ""
+    entity_ref = payload.get("entity_ref") or ""
+    key = entity_ref.split(":", 1)[1] if ":" in entity_ref else ""
+    if not key:
+        return
+    codes = await _affected_skus(ctx.session, ref_key, key)
+    if not codes:
+        return
+    from modules.procurement.routes import _recompute_estimated_landed
+
+    done = getattr(ctx, "_procurement_ref_recomputed", None)
+    if done is None:
+        done = set()
+        ctx._procurement_ref_recomputed = done  # дедуп пересчётов за один проход relay
+    fresh = [c for c in codes if c not in done]
+    for code in fresh:
+        done.add(code)
+        await _recompute_estimated_landed(ctx.session, code)
+    logger.info(
+        "Procurement: reference %s → пересчёт плановой landed (%d из %d, остальное — дедуп)",
+        ref_key, len(fresh), len(codes),
+    )

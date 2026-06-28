@@ -8,10 +8,15 @@
 """
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from modules.procurement.models import LandedCost
+
+# Факт приёмки (``actual``) важнее плановой оценки (``estimated``): реальный приход всегда
+# побеждает дооприходную оценку, даже если оценка пересчитана позже (круг 4/B2 пишет
+# estimated при смене справочников). Внутри стадии — самая свежая по ``fixed_at``.
+_ACTUAL_FIRST = case((LandedCost.stage == "actual", 0), else_=1)
 
 
 def _to_dict(row: LandedCost) -> dict:
@@ -34,7 +39,7 @@ class LandedCostService:
             await session.execute(
                 select(LandedCost)
                 .where(LandedCost.sku_code == sku_code)
-                .order_by(LandedCost.fixed_at.desc(), LandedCost.id.desc())
+                .order_by(_ACTUAL_FIRST, LandedCost.fixed_at.desc(), LandedCost.id.desc())
                 .limit(1)
             )
         ).scalars().first()
@@ -52,10 +57,10 @@ class LandedCostService:
             await session.execute(
                 select(LandedCost)
                 .where(LandedCost.sku_code.in_(result.keys()))
-                .order_by(LandedCost.fixed_at.desc(), LandedCost.id.desc())
+                .order_by(_ACTUAL_FIRST, LandedCost.fixed_at.desc(), LandedCost.id.desc())
             )
         ).scalars().all()
         for row in rows:
-            if result[row.sku_code] is None:  # первая встреченная = последняя по fixed_at
+            if result[row.sku_code] is None:  # первая встреченная = факт→оценка, затем свежее по fixed_at
                 result[row.sku_code] = _to_dict(row)
         return result

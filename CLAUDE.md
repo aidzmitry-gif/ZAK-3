@@ -18,7 +18,9 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
 - `landed_cost.py` — `LandedCostService` (реализация `core.services.landed_cost.LandedCostGateway`): чтение последней себестоимости по `sku_code` (+ батч).
 - `cost_estimate.py` — `estimate_china_cost` (чистая функция): предв. себестоимость импорта (Китай) per-line — цена+комиссия+страховка+фрахт+пошлина → landed BYN/шт (буфер курса ≥10%). НЕ дубль `allocate_landed_cost` (тот — распределение факт-издержек на приёмке).
 - `plan.py` — план сбора машины (чистая логика): `SHIPMENT_STAGES` (6 этапов Китай→Минск), `DEFAULT_METHODS` (Контейнер 112 дн / Машина 83 дн), `build_milestone_plan` (обратный waterfall от «В Минске до»), `total_transit_days`; срок клиента: `parse_deadline` (толерантный разбор даты-строки), `arrival_deadline` (срок − буфер), `LAST_MILE_BUFFER_DAYS` (3).
-- `events.py` — обработчик `on_production_scrap` (брак производства → претензия поставщику).
+- `events.py` — обработчики событий: `on_production_scrap` (брак → претензия), `on_stock_low` (дефицит →
+  автозаявка), `on_ship_deadline_set` (срок клиента → `ShipRequirement`), `on_reference_changed` (смена
+  справочника → пересчёт плановой landed, с дебаунсом каскада через `ctx`).
 - `routes.py` — HTTP-API под `/procurement` + маппинг строки в `FunnelCard` + фиксация landed cost по позициям на приёмке заказа (`_fixate_landed_cost`).
 - `stages.py` — список стадий воронки `STAGES` (id/title/color, порядок = колонки канбана).
 - `__init__.py` — пустой пакет-маркер.
@@ -62,6 +64,14 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
   `on_ship_deadline_set` складывает `ShipRequirement` по (сделка, sku) — крайняя дата клиента для плана
   машины (sales → procurement). Идемпотентно (upsert по deal_id+sku_code; снимает убранные позиции).
   Обработчики с `(payload, ctx)`: пишут в сессию relay, **коммит делает relay**, не обработчик.
+- **Подписан на** (subscribe): `reference.ref_tnved.changed` + `reference.sku.changed` (смена пошлины ТН ВЭД /
+  мастер-полей товара) → `on_reference_changed` пересчитывает ПЛАНОВУЮ (`estimated`) landed затронутых SKU
+  по открытым заказам через фасад `core.services.sku_master.landed_inputs` (пошлина) + `allocate_landed_cost`
+  (фрахт) — `_recompute_estimated_landed` (reference → procurement, круг 4 B2). **Шина без wildcard** —
+  подписка по конкретным типам, не `reference.*.changed`. **Дебаунс против каскада:** в одном проходе relay
+  каждый SKU пересчитывается не более раза (кэш на `ctx`). НДС/курс — доля Финансов (НДС возвратный, не в
+  landed; товар PO уже в BYN — курс не двигает BYN-landed). Затронутые SKU: `core.skus`→сам товар,
+  `core.tnved`→товары с этим (своим) кодом ТН ВЭД (групповое наследование — отложенный каскад).
 
 Эмит — через `core.event_bus.emit(session, "procurement.received", {...})` в той же
 транзакции (transactional outbox).
@@ -203,6 +213,12 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
   единицу в копейках. **Результат — в СВОЮ таблицу `procurement.landed_cost`, НЕ в
   `integrations.batch.unit_landed_cost`** (это схема СИНК — не трогать).
 - `last_landed_cost` → `None` при отсутствии строки (НЕ 0 — иначе спрятали бы дыру в марже).
+- **Факт важнее оценки в фасаде:** `last_landed_cost`/`_batch` сортируют `actual`→`estimated` (затем свежее
+  по `fixed_at`). Reference-пересчёт (B2) пишет `estimated`-строку (`purchase_order_id=NULL`, `shipment_id=
+  "ref-estimate"`) на SKU — она даёт продажам дооприходную себестоимость, но **не затирает** факт приёмки.
+  No-op на данных, где только `actual` (вся текущая боевая). Дооприходная оценка ВКЛЮЧАЕТ пошлину, факт
+  пока её опускает (Горизонт 2) → после приёмки число может «упасть» до факта; не занижение (оценка ≥ факт
+  по пошлине), сведётся, когда пошлина войдёт в `_fixate_landed_cost`.
 - Модель не добавляет `core.subscribe`/workflow/permissions — функциональность: CRUD/воронка + заказы с landed cost + фасад себестоимости.
 
 ## Планируемая функциональность

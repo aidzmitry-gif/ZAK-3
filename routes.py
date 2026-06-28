@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
@@ -372,6 +372,75 @@ def _order_allocation(lines: list[PurchaseOrderLine], freight: Decimal) -> tuple
         all_weighted = all(ln.weight > 0 for ln in landed_lines)
         expenses.append(LandedExpense("фрахт", freight, "weight" if all_weighted else "value"))
     return allocate_landed_cost(landed_lines, expenses), agg
+
+
+async def _recompute_estimated_landed(session: AsyncSession, sku_code: str) -> Decimal | None:
+    """Пересчитать ПЛАНОВУЮ (``estimated``) себестоимость SKU по открытым (в пути) заказам и
+    upsert одной строки ``LandedCost``. Вызывается при смене справочной ставки/мастер-поля
+    (``reference.*.changed``, круг 4/B2) — даёт продажам живую дооприходную себестоимость,
+    обновляемую при смене пошлины/мастер-данных. Возврат: новая себест/шт BYN или ``None``
+    (нет открытых заказов с этим SKU — базы для оценки нет, не выдумываем нулём).
+
+    Считаем ТОЛЬКО готовыми движками (контракт-фриз, методику не плодим): фрахт — общий
+    ``allocate_landed_cost`` (внутри ``_order_allocation``), пошлину % — из фасада ядра
+    ``sku_master.landed_inputs`` (REF3-1). Факт (``stage="actual"``) на приёмке имеет приоритет
+    в фасаде себестоимости — плановая оценка его НЕ затирает. Коммит — у вызывающего (relay).
+    """
+    from core.services import sku_master  # фасад ядра; локальный импорт — без цикла модулей
+
+    orders = (
+        await session.execute(
+            select(PurchaseOrder).where(PurchaseOrder.status.in_(OPEN_ORDER_STATUSES))
+        )
+    ).scalars().all()
+    # средневзвешенная (по qty) customs-стоимость/шт (goods+фрахт) по всем открытым заказам с SKU
+    # ponytail: O(заказы×SKU) при каскаде — перезагружаем заказы на каждый SKU; батчить, если вырастет
+    total_qty, weighted = Decimal("0"), Decimal("0")
+    for o in orders:
+        lines = (
+            await session.execute(
+                select(PurchaseOrderLine).where(PurchaseOrderLine.order_id == o.id)
+            )
+        ).scalars().all()
+        res, agg = _order_allocation(lines, Decimal(o.freight_byn))
+        for r in res["lines"]:
+            if r["sku_code"] != sku_code:
+                continue
+            qty = agg[sku_code]["qty"]
+            weighted += r["unit_landed_cost"] * qty
+            total_qty += qty
+    if total_qty <= 0:
+        return None
+    customs_unit = weighted / total_qty
+
+    inputs = await sku_master.landed_inputs(session, sku_code)
+    duty = inputs.get("duty_pct") if inputs else None  # % на дату или None (нет тарифа → без пошлины)
+    duty_rate = Decimal(str(duty)) / Decimal("100") if duty is not None else Decimal("0")
+    unit = (customs_unit * (Decimal("1") + duty_rate)).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+
+    # одна плановая строка на SKU: purchase_order_id IS NULL (UNIQUE не дедупит NULL → upsert вручную)
+    row = (
+        await session.execute(
+            select(LandedCost).where(
+                LandedCost.sku_code == sku_code,
+                LandedCost.purchase_order_id.is_(None),
+                LandedCost.stage == "estimated",
+            )
+        )
+    ).scalars().first()
+    if row is not None:
+        row.unit_landed_cost_byn = unit
+    else:
+        session.add(
+            LandedCost(
+                sku_code=sku_code,
+                purchase_order_id=None,
+                shipment_id="ref-estimate",
+                unit_landed_cost_byn=unit,
+                stage="estimated",
+            )
+        )
+    return unit
 
 
 async def _fixate_landed_cost(session: AsyncSession, order: PurchaseOrder, event_bus) -> None:
