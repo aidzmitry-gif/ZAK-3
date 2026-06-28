@@ -457,6 +457,8 @@ async def _fixate_landed_cost(session: AsyncSession, order: PurchaseOrder, event
     if not res["lines"]:
         return
 
+    from core.services import sku_master  # фасад ядра; локальный импорт — без цикла модулей
+
     shipment_id = order.number or f"purchase_order:{order.id}"
     existing = {
         row.sku_code: row
@@ -466,9 +468,28 @@ async def _fixate_landed_cost(session: AsyncSession, order: PurchaseOrder, event
             )
         ).scalars().all()
     }
+    # Пошлина ТН ВЭД per-SKU на ДАТУ приёмки — тем же путём, что в плановой оценке
+    # (``_recompute_estimated_landed``): % из фасада ядра ``sku_master.landed_inputs``, применённый
+    # к таможенной стоимости (goods + разнесённый фрахт) ПОСЛЕ разнесения фрахта. Батчем (один
+    # запрос на все SKU, не N+1). Нет кода/версии тарифа на дату → ``None`` → без пошлины (не нулём
+    # маскируем, а просто 0% надбавки). Так план (estimated) и факт (actual) сходятся по пошлине.
+    on_date = order.received_at.date() if order.received_at else None
+    duty_inputs = await sku_master.landed_inputs_batch(
+        session, [r["sku_code"] for r in res["lines"]], on_date
+    )
     unit_by_sku: dict[str, Decimal] = {}
     for r in res["lines"]:
-        code, unit = r["sku_code"], r["unit_landed_cost"]
+        code = r["sku_code"]
+        inp = duty_inputs.get(code)
+        duty = inp.get("duty_pct") if inp else None  # % на дату или None (нет тарифа → без пошлины)
+        duty_rate = Decimal(str(duty)) / Decimal("100") if duty is not None else Decimal("0")
+        unit = (r["unit_landed_cost"] * (Decimal("1") + duty_rate)).quantize(
+            Decimal("0.0001"), rounding=ROUND_HALF_UP
+        )
+        # тот же множитель на таможенный итог — чтобы finance (читает total) видел landed С пошлиной
+        landed_total = (r["landed_total"] * (Decimal("1") + duty_rate)).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
         unit_by_sku[code] = unit
         if code in existing:
             existing[code].unit_landed_cost_byn = unit
@@ -492,7 +513,7 @@ async def _fixate_landed_cost(session: AsyncSession, order: PurchaseOrder, event
                 "sku_code": code,
                 "unit_landed_cost_byn": str(unit),
                 "qty": str(agg[code]["qty"]),
-                "total_landed_byn": str(r["landed_total"]),
+                "total_landed_byn": str(landed_total),
                 "shipment_id": shipment_id,
                 "stage": "actual",  # факт приёмки (finance читает qty+total, не ветвится по stage)
                 "purchase_order_id": order.id,
