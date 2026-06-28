@@ -1,6 +1,7 @@
 """HTTP-API модуля Procurement. Монтируется под префиксом ``/procurement``."""
 from __future__ import annotations
 
+import math
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -28,6 +29,7 @@ from modules.procurement.models import (
 from modules.procurement.schemas import (
     CostEstimateOut,
     CostEstimateRequest,
+    DeficitRequestIn,
     PurchaseOrderCreate,
     PurchaseOrderHeaderUpdate,
     PurchaseOrderLineIn,
@@ -81,8 +83,34 @@ def _score_components(orders_count: int, claims_total: int, on_time_rate: float 
     return {"components": components, "score": round(score, 1)}
 
 
+async def _on_time_rates(session: AsyncSession, supplier_ids: set[int]) -> dict[int, float | None]:
+    """Своевременность поставщика (батч): доля принятых заказов, доставленных не позже ETA
+    (``received_at.date() <= eta_date``). В знаменателе — только заказы с обоими полями; без ETA
+    или без факта приёмки не учитываются. Поставщик без квалифицирующих заказов → нет ключа
+    (caller .get(sid) → None = honest-empty)."""
+    if not supplier_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(PurchaseOrder.supplier_id, PurchaseOrder.received_at, PurchaseOrder.eta_date)
+            .where(
+                PurchaseOrder.supplier_id.in_(supplier_ids),
+                PurchaseOrder.status == RECEIVED_ORDER_STATUS,
+                PurchaseOrder.received_at.is_not(None),
+                PurchaseOrder.eta_date.is_not(None),
+            )
+        )
+    ).all()
+    agg: dict[int, list[int]] = {}  # sid -> [on_time, total]
+    for sid, received_at, eta_date in rows:
+        bucket = agg.setdefault(sid, [0, 0])
+        bucket[0] += 1 if received_at.date() <= eta_date else 0
+        bucket[1] += 1
+    return {sid: (ot / tot if tot else None) for sid, (ot, tot) in agg.items()}
+
+
 async def _board_scores(session: AsyncSession, supplier_ids: set[int]) -> dict[int, float | None]:
-    """Балл поставщика для карточек воронки (батч, без N+1): по заказам и претензиям."""
+    """Балл поставщика для карточек воронки (батч, без N+1): по заказам, претензиям, своевременности."""
     if not supplier_ids:
         return {}
     orders = dict(
@@ -102,8 +130,9 @@ async def _board_scores(session: AsyncSession, supplier_ids: set[int]) -> dict[i
             .group_by(SupplierClaim.supplier_id)
         )).all()
     )
+    on_time = await _on_time_rates(session, supplier_ids)
     return {
-        sid: _score_components(int(orders.get(sid, 0)), int(claims.get(sid, 0)), None)["score"]
+        sid: _score_components(int(orders.get(sid, 0)), int(claims.get(sid, 0)), on_time.get(sid))["score"]
         for sid in supplier_ids
     }
 
@@ -123,6 +152,8 @@ def _to_card(r: PurchaseRequest, score: float | None = None) -> FunnelCard:
         date=r.due_date or "",
         insight=r.insight,
         score=score_txt,
+        # бейдж авто-источника: заявка, рождённая сигналом дефицита склада (P8). "" → нет бейджа.
+        status_tag="Авто: дефицит склада" if r.origin == "deficit" else "",
         tags=[f"{r.qty} шт"] if r.qty else [],
     )
 
@@ -191,6 +222,75 @@ async def update_request(
     return obj
 
 
+async def _request_from_deficit(
+    session: AsyncSession,
+    *,
+    sku_code: str,
+    sku_title: str = "",
+    warehouse: str = "Главный",
+    deficit: float | Decimal = 0,
+    reorder_qty: float | Decimal = 0,
+    supplier_id: int | None = None,
+) -> PurchaseRequest:
+    """Дефицит склада → черновик заявки на закупку (MRP-lite). Переиспользуется подпиской на
+    ``wms.stock.low`` и тонким эндпоинтом ``/requests/from-deficit``.
+
+    Идемпотентно: повторный сигнал по той же позиции (origin='deficit', та же ``item``) среди
+    незавершённых заявок не плодит дубль — возвращает существующую. Кол-во = ceil(reorder_qty
+    или deficit), минимум 1. ``item`` = sku_title (fallback sku_code) — единый ключ дедупа.
+    # ponytail: дедуп по item (у заявки нет колонки sku_code — миграция-фриз круга); для
+    # авто-сигнала item стабилен (=sku_title), повтор того же события совпадает точно.
+    """
+    item_val = sku_title or sku_code
+    existing = (
+        await session.execute(
+            select(PurchaseRequest).where(
+                PurchaseRequest.origin == "deficit",
+                PurchaseRequest.item == item_val,
+                PurchaseRequest.stage != "done",
+            )
+        )
+    ).scalars().first()
+    if existing is not None:
+        return existing  # идемпотентность — повтор сигнала не плодит заявку
+    amount = reorder_qty or deficit or 0
+    qty = max(1, math.ceil(Decimal(str(amount))))
+    obj = PurchaseRequest(
+        supplier="",
+        supplier_id=supplier_id,
+        item=item_val,
+        qty=qty,
+        stage="need",
+        origin="deficit",
+        insight=f"Автозаявка по дефициту: {warehouse}, не хватает {deficit}",
+    )
+    session.add(obj)
+    await session.flush()
+    if not obj.number:
+        obj.number = f"ЗАК-2026-{obj.id:04d}"
+    return obj
+
+
+@router.post("/requests/from-deficit", response_model=PurchaseRequestOut, status_code=201)
+async def request_from_deficit(
+    payload: DeficitRequestIn, session: AsyncSession = Depends(get_session)
+):
+    """Создать автозаявку из сигнала дефицита склада (debug/manual вход; штатный путь —
+    подписка на ``wms.stock.low``). Идемпотентно по (origin='deficit', позиция)."""
+    obj = await _request_from_deficit(
+        session,
+        sku_code=payload.sku_code,
+        sku_title=payload.sku_title,
+        warehouse=payload.warehouse,
+        deficit=payload.deficit,
+        reorder_qty=payload.reorder_qty,
+        supplier_id=payload.supplier_id,
+    )
+    await session.commit()
+    await session.refresh(obj)
+    return obj
+
+
 # ───────────────────────── Заказы (PurchaseOrder) + landed cost ─────────────────────────
 
 
@@ -216,6 +316,7 @@ async def _orders_out(session: AsyncSession, orders: list[PurchaseOrder]) -> lis
             supplier_id=o.supplier_id,
             status=o.status,
             eta_date=o.eta_date,
+            received_at=o.received_at,
             freight_byn=float(o.freight_byn),
             lines=[PurchaseOrderLineOut.model_validate(ln) for ln in lines_by_order.get(o.id, [])],
         )
@@ -284,6 +385,7 @@ async def _fixate_landed_cost(session: AsyncSession, order: PurchaseOrder, event
         if code in existing:
             existing[code].unit_landed_cost_byn = unit
             existing[code].shipment_id = shipment_id
+            existing[code].stage = "actual"  # повторная приёмка — снова факт
         else:
             session.add(
                 LandedCost(
@@ -291,7 +393,7 @@ async def _fixate_landed_cost(session: AsyncSession, order: PurchaseOrder, event
                     purchase_order_id=order.id,
                     shipment_id=shipment_id,
                     unit_landed_cost_byn=unit,
-                    stage="estimated",
+                    stage="actual",  # реальная приёмка (в отличие от плановой cost-estimate)
                 )
             )
         # push-инвалидация себестоимости для sales + landed-маржа для finance (payload JSON-safe)
@@ -304,7 +406,7 @@ async def _fixate_landed_cost(session: AsyncSession, order: PurchaseOrder, event
                 "qty": str(agg[code]["qty"]),
                 "total_landed_byn": str(r["landed_total"]),
                 "shipment_id": shipment_id,
-                "stage": "estimated",
+                "stage": "actual",  # факт приёмки (finance читает qty+total, не ветвится по stage)
                 "purchase_order_id": order.id,
                 "fx_rate": None,
                 "fx_date": None,
@@ -386,6 +488,7 @@ async def create_order(
     for ln in payload.lines:
         session.add(_new_line(order.id, ln))
     if order.status == RECEIVED_ORDER_STATUS:  # создан сразу принятым — зафиксировать cost
+        order.received_at = func.now()
         await session.flush()
         await _fixate_landed_cost(session, order, core.event_bus)
     await session.commit()
@@ -437,6 +540,7 @@ async def update_order_status(
             },
         )
         if payload.status == RECEIVED_ORDER_STATUS:
+            order.received_at = func.now()  # факт приёмки — основа своевременности (scorecard)
             await _fixate_landed_cost(session, order, core.event_bus)
     await session.commit()
     await session.refresh(order)
@@ -632,8 +736,8 @@ async def update_supplier(
 @router.get("/suppliers/{supplier_id}/scorecard")
 async def supplier_scorecard(supplier_id: int, session: AsyncSession = Depends(get_session)):
     """Скоркарта поставщика: заказы, претензии (откр/закр), средняя выигранная цена RFQ,
-    компоненты и итоговый балл 0–10. Своевременность (ETA vs факт) — honest-empty: дат факта
-    приёмки заказа пока нет."""
+    компоненты и итоговый балл 0–10. Своевременность — доля заказов, принятых не позже ETA
+    (received_at vs eta_date); None, если нет заказов с обоими полями (honest-empty)."""
     obj = await session.get(Supplier, supplier_id)
     if obj is None:
         raise HTTPException(status_code=404, detail="Поставщик не найден")
@@ -661,14 +765,16 @@ async def supplier_scorecard(supplier_id: int, session: AsyncSession = Depends(g
             )
         )
     ).scalar_one_or_none()
-    scoring = _score_components(orders_count, claims_for_quality, on_time_rate=None)
+    # своевременность: ETA vs факт приёмки (received_at) по принятым заказам поставщика
+    on_time_rate = (await _on_time_rates(session, {supplier_id})).get(supplier_id)
+    scoring = _score_components(orders_count, claims_for_quality, on_time_rate)
     return {
         "supplier_id": supplier_id,
         "orders_count": orders_count,
         "claims_open": claims_open,
         "claims_closed": claims_total - claims_open,
         "claims_total": claims_total,
-        "on_time_rate": None,  # honest-empty: нет дат факта приёмки заказа (ponytail: добавить received_at)
+        "on_time_rate": on_time_rate,  # None — нет заказов с ETA+фактом (honest-empty)
         "avg_won_price_byn": float(avg_price) if avg_price is not None else None,
         "components": scoring["components"],
         "score": scoring["score"],
@@ -678,7 +784,7 @@ async def supplier_scorecard(supplier_id: int, session: AsyncSession = Depends(g
 # ───────────────────────── RFQ / тендер закупки ─────────────────────────
 
 
-def _rfq_out(rfq: Rfq, bids: list[RfqBid]) -> RfqOut:
+def _rfq_out(rfq: Rfq, bids: list[RfqBid], created_order_id: int | None = None) -> RfqOut:
     bids_sorted = sorted(bids, key=lambda b: b.price_byn)  # минимальная цена первой
     best_bid_id = bids_sorted[0].id if bids_sorted else None
     return RfqOut(
@@ -691,6 +797,7 @@ def _rfq_out(rfq: Rfq, bids: list[RfqBid]) -> RfqOut:
         due_date=rfq.due_date,
         bids=[RfqBidOut.model_validate(b) for b in bids_sorted],
         best_bid_id=best_bid_id,
+        created_order_id=created_order_id,
     )
 
 
@@ -792,9 +899,39 @@ async def award_rfq(
             "entity_ref": f"rfq:{rfq.id}",
         },
     )
+
+    # P7: выигранный тендер → черновик PO у победителя (та же транзакция) + апстрим прогноза
+    # кэша для finance (procurement.po.drafted). PO остаётся draft (не «в пути») до размещения.
+    planned_amount = (Decimal(str(winner.price_byn)) * Decimal(str(rfq.qty))).quantize(Decimal("0.01"))
+    order = PurchaseOrder(supplier="", supplier_id=winner.supplier_id, status="draft")
+    session.add(order)
+    await session.flush()
+    if not order.number:
+        order.number = f"PO-2026-{order.id:04d}"
+    session.add(
+        PurchaseOrderLine(
+            order_id=order.id,
+            sku_code=rfq.sku_code,
+            qty=Decimal(str(rfq.qty)),
+            goods_value_byn=planned_amount,  # цена победителя × кол-во = плановая стоимость позиции
+        )
+    )
+    core.event_bus.emit(
+        session,
+        "procurement.po.drafted",
+        {
+            "po_ref": order.number,
+            "supplier_id": winner.supplier_id,
+            "planned_amount": str(planned_amount),
+            "currency": "BYN",
+            "eta_date": order.eta_date.isoformat() if order.eta_date else None,
+            "deal_id": None,  # PO обслуживает много сделок — привязки к сделке нет (см. фриз §2)
+        },
+    )
+
     await session.commit()
     await session.refresh(rfq)
-    return _rfq_out(rfq, await _bids_of(session, rfq_id))
+    return _rfq_out(rfq, await _bids_of(session, rfq_id), created_order_id=order.id)
 
 
 # ───────────────────────── Претензии поставщикам ─────────────────────────
@@ -836,6 +973,16 @@ async def update_claim(
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(obj, field, value)
     if not was_closed and obj.status in CLAIM_CLOSED_STATUSES:
+        # P6: резолв номера заказа (order_code → PurchaseOrder.number) для finance. None, если
+        # претензия не привязана к заказу. Себестоимость НЕ пересчитываем (риск порчи факт-cost).
+        # ponytail: фактический пересчёт unit_landed_cost по возврату — Горизонт 2.
+        order_id = None
+        if obj.order_code:
+            order_id = (
+                await session.execute(
+                    select(PurchaseOrder.id).where(PurchaseOrder.number == obj.order_code)
+                )
+            ).scalar_one_or_none()
         core.event_bus.emit(
             session,
             "procurement.claim.resolved",
@@ -846,6 +993,7 @@ async def update_claim(
                 "amount_byn": None if obj.amount_byn is None else str(obj.amount_byn),
                 "resolution": obj.resolution,
                 "status": obj.status,
+                "order_id": order_id,
                 "entity_ref": f"claim:{obj.id}",
             },
         )

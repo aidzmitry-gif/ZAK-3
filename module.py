@@ -16,6 +16,8 @@ class ProcurementModule(ModuleContract):
         core.include_router(routes.router, prefix=self.api_prefix)
         # брак в производстве → автопретензия поставщику (production → procurement, §2.5)
         core.subscribe("production.scrap", events.on_production_scrap)
+        # дефицит склада → авто-черновик заявки на закупку (wms → procurement, MRP-lite, круг 3)
+        core.subscribe("wms.stock.low", events.on_stock_low)
         core.register_widget(Widget("procurement", "Закупки", source="procurement.requests"))
         # себестоимость партии наружу — sales читает через фасад для расчёта маржи (§6)
         core.services.landed_cost = LandedCostService()

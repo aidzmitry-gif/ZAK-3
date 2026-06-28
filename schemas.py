@@ -1,7 +1,7 @@
 """Pydantic-схемы модуля Procurement."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -26,6 +26,7 @@ class PurchaseRequestCreate(BaseModel):
     number: str = ""
     due_date: str | None = None
     insight: str = ""
+    origin: str = ""  # "" (ручная) / "deficit" (автозаявка по сигналу дефицита склада)
 
 
 class PurchaseRequestOut(BaseModel):
@@ -44,6 +45,19 @@ class PurchaseRequestOut(BaseModel):
     stage: str
     due_date: str | None = None
     insight: str = ""
+    origin: str = ""  # источник заявки (для бейджа «Авто: дефицит склада» на доске)
+
+
+class DeficitRequestIn(BaseModel):
+    """Запрос на создание автозаявки из сигнала дефицита склада (тонкий debug/manual вход;
+    штатный путь — подписка на ``wms.stock.low``). Идемпотентно по (origin='deficit', позиция)."""
+
+    sku_code: str
+    sku_title: str = ""
+    warehouse: str = "Главный"
+    deficit: float = Field(0, ge=0)
+    reorder_qty: float = Field(0, ge=0)
+    supplier_id: int | None = None
 
 
 class StageUpdate(BaseModel):
@@ -91,6 +105,7 @@ class PurchaseOrderOut(BaseModel):
     supplier_id: int | None = None
     status: str
     eta_date: date | None = None
+    received_at: datetime | None = None  # факт приёмки (статус → received); None пока открыт
     freight_byn: float
     lines: list[PurchaseOrderLineOut] = []
 
@@ -284,6 +299,7 @@ class RfqOut(BaseModel):
     due_date: date | None = None
     bids: list[RfqBidOut] = []
     best_bid_id: int | None = None  # bid с минимальной ценой (для подсветки лучшей)
+    created_order_id: int | None = None  # черновик PO, созданный при award (P7); None — не создан
 
 
 class RfqAward(BaseModel):

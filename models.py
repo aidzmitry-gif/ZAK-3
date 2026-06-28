@@ -45,6 +45,8 @@ class PurchaseRequest(Base):
     stage: Mapped[str] = mapped_column(String(32), default="need", server_default="need")
     due_date: Mapped[str | None] = mapped_column(String(32))
     insight: Mapped[str] = mapped_column(String(400), default="", server_default="")
+    # источник заявки: "" (ручная) / "deficit" (автозаявка по сигналу дефицита склада, wms.stock.low)
+    origin: Mapped[str] = mapped_column(String(32), default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -105,6 +107,8 @@ class PurchaseOrder(Base):
     supplier_id: Mapped[int | None] = mapped_column(Integer)  # soft-ref на procurement.supplier
     status: Mapped[str] = mapped_column(String(16), default="draft", server_default="draft")
     eta_date: Mapped[date | None] = mapped_column(Date)  # ожидаемое прибытие (ETA)
+    # фактическая дата приёмки (статус → received); None пока заказ открыт — основа своевременности
+    received_at: Mapped[datetime | None] = mapped_column(DateTime)
     # общий фрахт партии (BYN), разносится на позиции при приёмке (база — вес, иначе стоимость)
     freight_byn: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"), server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
