@@ -5,6 +5,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     Date,
     DateTime,
@@ -109,6 +110,9 @@ class PurchaseOrder(Base):
     eta_date: Mapped[date | None] = mapped_column(Date)  # ожидаемое прибытие (ETA)
     # фактическая дата приёмки (статус → received); None пока заказ открыт — основа своевременности
     received_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # план сбора машины (Китай→Минск): способ перевозки (шаблон длительностей) + дедлайн «В Минске до»
+    transport_method_code: Mapped[str | None] = mapped_column(String(32))  # soft-ref на transport_method.code
+    target_arrival_date: Mapped[date | None] = mapped_column(Date)  # «В Минске до» — якорь обратного плана
     # общий фрахт партии (BYN), разносится на позиции при приёмке (база — вес, иначе стоимость)
     freight_byn: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"), server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -230,3 +234,48 @@ class RfqBid(Base):
     note: Mapped[str] = mapped_column(String(400), default="", server_default="")
     is_winner: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class TransportMethod(Base):
+    """Способ перевозки = шаблон длительностей этапов (дни) для плана машины.
+
+    Редактируемый справочник: ``durations`` — {stage: дни} по этапам ``plan.SHIPMENT_STAGES``.
+    Дефолты (Контейнер ≈112 дн / Машина ≈83 дн) сидятся из ``plan.DEFAULT_METHODS``; на
+    конкретной машине длительность этапа можно переопределить (см. ``PurchaseOrderMilestone``).
+    """
+
+    __tablename__ = "transport_method"
+    __table_args__ = {"schema": "procurement"}
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(32), unique=True)  # container / truck / …
+    name: Mapped[str] = mapped_column(String(64))
+    durations: Mapped[dict] = mapped_column(JSON, default=dict)  # {stage: дни}
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class PurchaseOrderMilestone(Base):
+    """Веха графика сбора машины: этап + план/факт даты (обратный waterfall от «В Минске до»).
+
+    Одна строка на (заказ, этап). ``planned_date`` пересчитывается из шаблона способа перевозки
+    при планировании; ``duration_days`` копируется из шаблона и правится на машине; ``actual_date`` —
+    факт (приходит из событий: приёмка ⑦ из ``procurement.received``, отгрузка/таможня — из логистики).
+    """
+
+    __tablename__ = "purchase_order_milestone"
+    __table_args__ = (
+        UniqueConstraint("order_id", "stage"),  # одна веха каждого этапа на заказ
+        Index("ix_purchase_order_milestone_order", "order_id"),
+        {"schema": "procurement"},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_id: Mapped[int] = mapped_column(
+        ForeignKey("procurement.purchase_order.id", ondelete="CASCADE")
+    )
+    stage: Mapped[str] = mapped_column(String(32))  # id этапа из plan.SHIPMENT_STAGES
+    seq: Mapped[int] = mapped_column(Integer, default=0)  # порядок этапа
+    duration_days: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    planned_date: Mapped[date | None] = mapped_column(Date)
+    actual_date: Mapped[date | None] = mapped_column(Date)

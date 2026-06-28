@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.runtime.core import Core
@@ -20,16 +22,28 @@ from modules.procurement.models import (
     LandedCost,
     PurchaseOrder,
     PurchaseOrderLine,
+    PurchaseOrderMilestone,
     PurchaseRequest,
     Rfq,
     RfqBid,
     Supplier,
     SupplierClaim,
+    TransportMethod,
+)
+from modules.procurement.plan import (
+    DEFAULT_METHODS,
+    STAGE_ORDER,
+    STAGE_TITLES,
+    build_milestone_plan,
+    total_transit_days,
 )
 from modules.procurement.schemas import (
     CostEstimateOut,
     CostEstimateRequest,
     DeficitRequestIn,
+    MilestoneOut,
+    OrderPlanIn,
+    OrderPlanOut,
     PurchaseOrderCreate,
     PurchaseOrderHeaderUpdate,
     PurchaseOrderLineIn,
@@ -50,6 +64,8 @@ from modules.procurement.schemas import (
     SupplierCreate,
     SupplierOut,
     SupplierUpdate,
+    TransportMethodOut,
+    TransportMethodUpdate,
 )
 from modules.procurement.stages import STAGES
 
@@ -488,9 +504,11 @@ async def create_order(
     for ln in payload.lines:
         session.add(_new_line(order.id, ln))
     if order.status == RECEIVED_ORDER_STATUS:  # создан сразу принятым — зафиксировать cost
-        order.received_at = func.now()
+        received = datetime.now(timezone.utc).replace(tzinfo=None)
+        order.received_at = received
         await session.flush()
         await _fixate_landed_cost(session, order, core.event_bus)
+        await _mark_arrival_fact(session, order.id, received.date())
     await session.commit()
     await session.refresh(order)
     return (await _orders_out(session, [order]))[0]
@@ -540,8 +558,11 @@ async def update_order_status(
             },
         )
         if payload.status == RECEIVED_ORDER_STATUS:
-            order.received_at = func.now()  # факт приёмки — основа своевременности (scorecard)
+            # наивный UTC (как sales._utcnow): один источник времени для received_at и факта ⑦
+            received = datetime.now(timezone.utc).replace(tzinfo=None)
+            order.received_at = received  # факт приёмки — основа своевременности (scorecard)
             await _fixate_landed_cost(session, order, core.event_bus)
+            await _mark_arrival_fact(session, order.id, received.date())  # факт ⑦ В Минске в план машины
     await session.commit()
     await session.refresh(order)
     return (await _orders_out(session, [order]))[0]
@@ -1000,3 +1021,157 @@ async def update_claim(
     await session.commit()
     await session.refresh(obj)
     return obj
+
+
+# ───────────────────────── План сбора машины (этапы Китай → Минск) ─────────────────────────
+
+
+async def _ensure_default_methods(session: AsyncSession) -> None:
+    """Засеять справочник способов перевозки дефолтами (Контейнер/Машина), если кода нет.
+    Идемпотентно + устойчиво к гонке первого старта: вставку в savepoint, IntegrityError
+    глотаем (параллельный запрос успел засеять те же коды — это ок). Работает и в SQLite-dev."""
+    have = set((await session.execute(select(TransportMethod.code))).scalars().all())
+    missing = [(c, s) for c, s in DEFAULT_METHODS.items() if c not in have]
+    if not missing:
+        return
+    try:
+        async with session.begin_nested():  # savepoint: конфликт уникальности не валит запрос
+            for code, spec in missing:
+                session.add(
+                    TransportMethod(code=code, name=spec["name"], durations=dict(spec["durations"]))
+                )
+    except IntegrityError:
+        pass  # параллельный первый старт уже засеял эти коды
+
+
+def _method_out(m: TransportMethod) -> TransportMethodOut:
+    durations = m.durations or {}
+    return TransportMethodOut(
+        code=m.code, name=m.name, durations=durations,
+        total_days=total_transit_days(durations), active=m.active,
+    )
+
+
+@router.get("/transport-methods", response_model=list[TransportMethodOut])
+async def list_transport_methods(session: AsyncSession = Depends(get_session)):
+    """Справочник способов перевозки с длительностями этапов (Контейнер/Машина; редактируемый)."""
+    await _ensure_default_methods(session)
+    await session.commit()
+    rows = (await session.execute(select(TransportMethod).order_by(TransportMethod.id))).scalars().all()
+    return [_method_out(m) for m in rows]
+
+
+@router.patch("/transport-methods/{code}", response_model=TransportMethodOut)
+async def update_transport_method(
+    code: str, payload: TransportMethodUpdate, session: AsyncSession = Depends(get_session)
+):
+    """Править способ перевозки: название / длительности этапов / активность (мерж длительностей)."""
+    await _ensure_default_methods(session)
+    m = (
+        await session.execute(select(TransportMethod).where(TransportMethod.code == code))
+    ).scalars().first()
+    if m is None:
+        raise HTTPException(status_code=404, detail="Способ перевозки не найден")
+    data = payload.model_dump(exclude_unset=True)
+    durations = data.pop("durations", None)
+    if durations is not None:
+        m.durations = {**(m.durations or {}), **{k: int(v) for k, v in durations.items()}}
+    for field, value in data.items():
+        if value is not None:
+            setattr(m, field, value)
+    await session.commit()
+    await session.refresh(m)
+    return _method_out(m)
+
+
+async def _order_milestones(session: AsyncSession, order_id: int) -> list[PurchaseOrderMilestone]:
+    return list(
+        (await session.execute(
+            select(PurchaseOrderMilestone)
+            .where(PurchaseOrderMilestone.order_id == order_id)
+            .order_by(PurchaseOrderMilestone.seq)
+        )).scalars().all()
+    )
+
+
+def _plan_out(order: PurchaseOrder, milestones: list[PurchaseOrderMilestone]) -> OrderPlanOut:
+    ms = [
+        MilestoneOut(
+            stage=m.stage, title=STAGE_TITLES.get(m.stage, m.stage), seq=m.seq,
+            duration_days=m.duration_days, planned_date=m.planned_date, actual_date=m.actual_date,
+        )
+        for m in milestones
+    ]
+    # «Спланирован заказ» = окончание первого этапа − его длительность
+    start = None
+    if milestones and milestones[0].planned_date is not None:
+        start = milestones[0].planned_date - timedelta(days=milestones[0].duration_days)
+    return OrderPlanOut(
+        order_id=order.id,
+        transport_method_code=order.transport_method_code,
+        target_arrival_date=order.target_arrival_date,
+        start_date=start,
+        total_days=sum(m.duration_days for m in milestones),
+        milestones=ms,
+    )
+
+
+@router.get("/orders/{order_id}/plan", response_model=OrderPlanOut)
+async def get_order_plan(order_id: int, session: AsyncSession = Depends(get_session)):
+    """План сбора машины: этапы с план/факт датами (обратный waterfall от «В Минске до»)."""
+    order = await session.get(PurchaseOrder, order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    return _plan_out(order, await _order_milestones(session, order_id))
+
+
+@router.post("/orders/{order_id}/plan", response_model=OrderPlanOut)
+async def plan_order(
+    order_id: int, payload: OrderPlanIn, session: AsyncSession = Depends(get_session)
+):
+    """Запланировать/пересчитать график сбора машины: способ перевозки + дедлайн «В Минске до».
+    Этапы — обратный waterfall от target_arrival_date; факт (actual_date) этапов сохраняется."""
+    order = await session.get(PurchaseOrder, order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    await _ensure_default_methods(session)
+    method = (
+        await session.execute(
+            select(TransportMethod).where(TransportMethod.code == payload.transport_method_code)
+        )
+    ).scalars().first()
+    if method is None:
+        raise HTTPException(status_code=404, detail="Способ перевозки не найден")
+    durations = method.durations or DEFAULT_METHODS.get(method.code, {}).get("durations", {})
+    plans, _start = build_milestone_plan(durations, payload.target_arrival_date)
+
+    order.transport_method_code = method.code
+    order.target_arrival_date = payload.target_arrival_date
+    existing = {m.stage: m for m in await _order_milestones(session, order_id)}
+    for p in plans:
+        m = existing.get(p["stage"])
+        if m is not None:  # пересчёт: план обновляем, факт (actual_date) НЕ трогаем
+            m.seq, m.duration_days, m.planned_date = p["seq"], p["duration_days"], p["planned_date"]
+        else:
+            session.add(PurchaseOrderMilestone(
+                order_id=order.id, stage=p["stage"], seq=p["seq"],
+                duration_days=p["duration_days"], planned_date=p["planned_date"],
+            ))
+    await session.commit()
+    return _plan_out(order, await _order_milestones(session, order_id))
+
+
+async def _mark_arrival_fact(session: AsyncSession, order_id: int, arrival_date) -> None:
+    """Факт прихода в Минск (⑦): проставить actual_date последнего этапа (растоможка/В Минске)
+    при приёмке заказа, если у машины есть план. ``arrival_date`` берём тем же часам, что и
+    ``received_at`` заказа (наивный UTC) — чтобы план↔факт и своевременность не разъехались на день."""
+    last = (
+        await session.execute(
+            select(PurchaseOrderMilestone).where(
+                PurchaseOrderMilestone.order_id == order_id,
+                PurchaseOrderMilestone.stage == STAGE_ORDER[-1],
+            )
+        )
+    ).scalars().first()
+    if last is not None and last.actual_date is None:
+        last.actual_date = arrival_date

@@ -304,3 +304,48 @@ class RfqOut(BaseModel):
 
 class RfqAward(BaseModel):
     bid_id: int
+
+
+# ───────────────────── План сбора машины (этапы Китай → Минск) ─────────────────────
+
+
+class TransportMethodOut(BaseModel):
+    code: str
+    name: str
+    durations: dict[str, int]  # {stage: дни}
+    total_days: int
+    active: bool = True
+
+
+class TransportMethodUpdate(BaseModel):
+    """Правка справочника способов перевозки (название / длительности этапов / активность)."""
+
+    name: str | None = None
+    durations: dict[str, int] | None = None
+    active: bool | None = None
+
+
+class MilestoneOut(BaseModel):
+    stage: str
+    title: str
+    seq: int
+    duration_days: int
+    planned_date: date | None = None
+    actual_date: date | None = None
+
+
+class OrderPlanIn(BaseModel):
+    """Запланировать машину: способ перевозки (шаблон длительностей) + дедлайн «В Минске до».
+    План этапов считается обратным waterfall от ``target_arrival_date``."""
+
+    transport_method_code: str
+    target_arrival_date: date
+
+
+class OrderPlanOut(BaseModel):
+    order_id: int
+    transport_method_code: str | None = None
+    target_arrival_date: date | None = None
+    start_date: date | None = None  # «Спланирован заказ» (начало сбора)
+    total_days: int = 0
+    milestones: list[MilestoneOut] = []
