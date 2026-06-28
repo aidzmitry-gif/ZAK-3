@@ -336,10 +336,26 @@ class MilestoneOut(BaseModel):
 
 class OrderPlanIn(BaseModel):
     """Запланировать машину: способ перевозки (шаблон длительностей) + дедлайн «В Минске до».
-    План этапов считается обратным waterfall от ``target_arrival_date``."""
+    План этапов — обратный waterfall от ``target_arrival_date``. Если дата не задана — берётся
+    авто-подсказка: самый ранний срок клиента среди позиций − буфер последней мили."""
 
     transport_method_code: str
-    target_arrival_date: date
+    target_arrival_date: date | None = None  # None → авто из срока клиента
+
+
+class AtRiskDeal(BaseModel):
+    """Сделка под риском срыва срока: план машины приходит позже крайней даты В Минске."""
+
+    deal_id: int
+    number: str = ""
+    counterparty: str = ""
+    sku_code: str = ""
+    ship_deadline: str | None = None  # срок клиента (сырой)
+    required_arrival: date | None = None  # срок − буфер (когда машина обязана быть в Минске)
+    slack_days: int | None = None  # required_arrival − target (≥0 запас, <0 опоздание)
+    penalty_rate_pct: float | None = None
+    penalty_cap_pct: float | None = None
+    penalty_terms: str | None = None
 
 
 class OrderPlanOut(BaseModel):
@@ -349,3 +365,9 @@ class OrderPlanOut(BaseModel):
     start_date: date | None = None  # «Спланирован заказ» (начало сбора)
     total_days: int = 0
     milestones: list[MilestoneOut] = []
+    # ограничение и риск от срока клиента (sales → procurement)
+    required_by: date | None = None  # самый ранний срок клиента среди позиций машины
+    required_arrival: date | None = None  # required_by − буфер: крайняя дата «В Минске»
+    slack_days: int | None = None  # required_arrival − target_arrival (<0 = опоздание)
+    at_risk: bool = False  # план приходит позже крайней даты (или старт уже в прошлом)
+    at_risk_deals: list[AtRiskDeal] = []

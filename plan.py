@@ -8,7 +8,13 @@
 """
 from __future__ import annotations
 
+import re
 from datetime import date, timedelta
+
+# Буфер «последней мили»: дни между приходом на склад в Минске (⑦) и фактической отгрузкой
+# клиенту (приёмка/комплектация/отгрузка). «В Минске до» = срок клиента − этот буфер.
+# ponytail: дефолт-константа; вынос в AIOS_-настройку — через config/settings.py (хотспот, координатор).
+LAST_MILE_BUFFER_DAYS = 3
 
 # Этапы в порядке прохождения (id, человекочитаемое название). Каждый этап = его ОКОНЧАНИЕ
 # (дедлайн): «Сбор до», «оплата», … Последний (customs) завершается в дату «В Минске до».
@@ -65,3 +71,28 @@ def build_milestone_plan(
         p["seq"] = seq
     start_date = cursor  # после полного отката — дата планирования заказа
     return plans, start_date
+
+
+def parse_deadline(value) -> date | None:
+    """Толерантный разбор даты срока клиента (продажи хранят строкой). ISO YYYY-MM-DD,
+    DD.MM.YYYY / DD,MM,YYYY / DD/MM/YYYY. Неразобранное → None (риск считаем honest-empty)."""
+    if not value:
+        return None
+    s = str(value).strip()
+    try:
+        return date.fromisoformat(s[:10])
+    except ValueError:
+        pass
+    m = re.match(r"^(\d{1,2})[.,/](\d{1,2})[.,/](\d{4})$", s)
+    if m:
+        d, mo, y = (int(g) for g in m.groups())
+        try:
+            return date(y, mo, d)
+        except ValueError:
+            return None
+    return None
+
+
+def arrival_deadline(ship_deadline: date | None, buffer_days: int = LAST_MILE_BUFFER_DAYS) -> date | None:
+    """Крайняя дата прихода в Минск, чтобы успеть отгрузить клиенту в срок = срок − буфер."""
+    return None if ship_deadline is None else ship_deadline - timedelta(days=buffer_days)

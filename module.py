@@ -18,6 +18,8 @@ class ProcurementModule(ModuleContract):
         core.subscribe("production.scrap", events.on_production_scrap)
         # дефицит склада → авто-черновик заявки на закупку (wms → procurement, MRP-lite, круг 3)
         core.subscribe("wms.stock.low", events.on_stock_low)
+        # срок отгрузки клиенту из продаж → требования к плану машины (sales → procurement)
+        core.subscribe("sales.deal.ship_deadline.set", events.on_ship_deadline_set)
         core.register_widget(Widget("procurement", "Закупки", source="procurement.requests"))
         # себестоимость партии наружу — sales читает через фасад для расчёта маржи (§6)
         core.services.landed_cost = LandedCostService()

@@ -3,7 +3,7 @@
 **Тип:** git submodule → ZAK-3 (правка = коммит в этот репозиторий)
 **API-префикс:** `/procurement`
 **Схема БД:** `procurement`
-**Статус:** наполнен (воронка закупок; справочник поставщиков + scorecard со своевременностью; RFQ/тендер с авто-черновиком PO; заказы PO с машиной состояний, ETA, приходом на склад по позициям; landed cost наружу через фасад (estimated→actual на приёмке) + предв. себес «Расчёт Китай»; претензии авто+ручные; **реактивный MRP-lite: `wms.stock.low` → авто-черновик заявки**; **план сбора машины: этапы Китай→Минск, обратный waterfall от «В Минске до», шаблон длительностей по способу перевозки**; без workflow/permissions)
+**Статус:** наполнен (воронка закупок; справочник поставщиков + scorecard со своевременностью; RFQ/тендер с авто-черновиком PO; заказы PO с машиной состояний, ETA, приходом на склад по позициям; landed cost наружу через фасад (estimated→actual на приёмке) + предв. себес «Расчёт Китай»; претензии авто+ручные; **реактивный MRP-lite: `wms.stock.low` → авто-черновик заявки**; **план сбора машины: этапы Китай→Минск, обратный waterfall от «В Минске до» (или от срока клиента из продаж − буфер), шаблон длительностей по способу перевозки, риск срыва/штрафа**; без workflow/permissions)
 
 ## Назначение
 Управление закупками (sourcing): ведение заявок на закупку по канбан-воронке от
@@ -17,7 +17,7 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
 - `schemas.py` — Pydantic-схемы воронки/заказа/позиций/претензий + `Supplier{Create,Update,Out}`, `Rfq{Create,Out}`/`RfqBid{In,Out}`/`RfqAward`, `SupplierClaimCreate`, `PurchaseOrderHeaderUpdate`, `CostEstimate*`.
 - `landed_cost.py` — `LandedCostService` (реализация `core.services.landed_cost.LandedCostGateway`): чтение последней себестоимости по `sku_code` (+ батч).
 - `cost_estimate.py` — `estimate_china_cost` (чистая функция): предв. себестоимость импорта (Китай) per-line — цена+комиссия+страховка+фрахт+пошлина → landed BYN/шт (буфер курса ≥10%). НЕ дубль `allocate_landed_cost` (тот — распределение факт-издержек на приёмке).
-- `plan.py` — план сбора машины (чистая логика): `SHIPMENT_STAGES` (7 этапов Китай→Минск), `DEFAULT_METHODS` (Контейнер 112 дн / Машина 83 дн), `build_milestone_plan` (обратный waterfall от «В Минске до»), `total_transit_days`.
+- `plan.py` — план сбора машины (чистая логика): `SHIPMENT_STAGES` (6 этапов Китай→Минск), `DEFAULT_METHODS` (Контейнер 112 дн / Машина 83 дн), `build_milestone_plan` (обратный waterfall от «В Минске до»), `total_transit_days`; срок клиента: `parse_deadline` (толерантный разбор даты-строки), `arrival_deadline` (срок − буфер), `LAST_MILE_BUFFER_DAYS` (3).
 - `events.py` — обработчик `on_production_scrap` (брак производства → претензия поставщику).
 - `routes.py` — HTTP-API под `/procurement` + маппинг строки в `FunnelCard` + фиксация landed cost по позициям на приёмке заказа (`_fixate_landed_cost`).
 - `stages.py` — список стадий воронки `STAGES` (id/title/color, порядок = колонки канбана).
@@ -26,7 +26,8 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
 ## Что регистрирует в ядре (из register())
 - **Роуты:** `core.include_router(routes.router, prefix="/procurement")`.
 - **Подписки:** `core.subscribe("production.scrap", events.on_production_scrap)` — брак → претензия;
-  `core.subscribe("wms.stock.low", events.on_stock_low)` — дефицит склада → авто-черновик заявки (MRP-lite).
+  `core.subscribe("wms.stock.low", events.on_stock_low)` — дефицит склада → авто-черновик заявки (MRP-lite);
+  `core.subscribe("sales.deal.ship_deadline.set", events.on_ship_deadline_set)` — срок отгрузки клиенту → требование к плану машины.
 - **Виджет:** `core.register_widget(Widget("procurement", "Закупки", source="procurement.requests"))`.
 - **Фасад себестоимости:** `core.services.landed_cost = LandedCostService()` — продажи читают landed cost по `sku_code` через фасад ядра (CQRS, как `stock`/`onec`), не импортируя procurement.
 - Workflow / permissions / roles / telegram — **не регистрируются**.
@@ -57,6 +58,9 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
 - **Подписан на** (subscribe): `wms.stock.low` (дефицит склада, плоский canonical payload) →
   `on_stock_low` создаёт авто-черновик заявки (`PurchaseRequest`, `origin="deficit"`, `stage="need"`)
   через `_request_from_deficit` (идемпотентно по позиции). Реактивный MRP-lite (wms → procurement).
+- **Подписан на** (subscribe): `sales.deal.ship_deadline.set` (срок отгрузки клиенту + штраф + позиции) →
+  `on_ship_deadline_set` складывает `ShipRequirement` по (сделка, sku) — крайняя дата клиента для плана
+  машины (sales → procurement). Идемпотентно (upsert по deal_id+sku_code; снимает убранные позиции).
   Обработчики с `(payload, ctx)`: пишут в сессию relay, **коммит делает relay**, не обработчик.
 
 Эмит — через `core.event_bus.emit(session, "procurement.received", {...})` в той же
@@ -125,6 +129,11 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
 - Схема таблиц `supplier`/`rfq`/`rfq_bid` + колонки `supplier_id`/поля претензий + PO default `draft` — миграция `0065`.
 - Колонки `purchase_request.origin` + `purchase_order.received_at` (круг 3, MRP-lite + своевременность) — миграция `0071`.
 - Таблицы `transport_method`/`purchase_order_milestone` + `purchase_order.transport_method_code`/`target_arrival_date` (план сбора машины) — миграция `0072`.
+- **`ship_requirement`** (`ShipRequirement`) — срок отгрузки клиенту по (сделка, sku) из продаж:
+  `id`, `deal_id` (soft-ref на sales.deal), `number`, `counterparty`, `sku_code`, `qty`, `ship_deadline`
+  (сырая строка), `ship_deadline_date` (разобранная дата), `penalty_rate_pct`/`penalty_cap_pct`/`penalty_terms`,
+  `updated_at`. `UNIQUE (deal_id, sku_code)` + индекс `ix_ship_requirement_sku`. Наполняется из
+  `sales.deal.ship_deadline.set`. Машина планируется к самому раннему сроку позиций − буфер. Миграция `0074`.
 
 ## API-эндпоинты (ключевые)
 - `GET /procurement/requests` — плоский список заявок (сортировка по `id` desc), `list[PurchaseRequestOut]`.
@@ -145,8 +154,8 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
 - `POST /procurement/orders/{order_id}/lines` / `DELETE …/lines/{line_id}` — добавить/убрать позицию (редактор машины; 409 на принятом).
 - `GET /procurement/orders/{order_id}/landed-preview` — предпросмотр распределения landed cost БЕЗ фиксации (live-пересчёт; reuse `allocate_landed_cost`).
 - `GET /procurement/transport-methods` / `PATCH …/{code}` — справочник способов перевозки (шаблон длительностей этапов; лениво сидится Контейнер/Машина; правка названия/длительностей/активности).
-- `POST /procurement/orders/{order_id}/plan` — запланировать/пересчитать график сбора машины (способ перевозки + дедлайн «В Минске до»); этапы — обратный waterfall, факт (`actual_date`) сохраняется.
-- `GET /procurement/orders/{order_id}/plan` — план сбора машины: этапы с план/факт датами + старт + итог дней.
+- `POST /procurement/orders/{order_id}/plan` — запланировать/пересчитать график сбора машины (способ перевозки + дедлайн «В Минске до»); этапы — обратный waterfall, факт (`actual_date`) сохраняется. Если дата не задана — авто-подсказка из самого раннего срока клиента − буфер (422, если нет ни даты, ни срока).
+- `GET /procurement/orders/{order_id}/plan` — план сбора машины: этапы с план/факт датами + старт + итог дней + ограничение от срока клиента (`required_by`/`required_arrival`/`slack_days`/`at_risk`/`at_risk_deals` со штрафом).
 - `POST /procurement/cost-estimate` — предв. себестоимость импорта (Китай) по позициям; чистый расчёт без БД; цена/наценка/НДС НЕ считаются (полоса «Маржа»).
 - `GET/POST /procurement/suppliers`, `GET/PATCH /procurement/suppliers/{id}` — справочник поставщиков (CRUD; 404).
 - `GET /procurement/suppliers/{id}/scorecard` — балл поставщика 0–10 (заказы/претензии/выигранные RFQ;

@@ -279,3 +279,36 @@ class PurchaseOrderMilestone(Base):
     duration_days: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     planned_date: Mapped[date | None] = mapped_column(Date)
     actual_date: Mapped[date | None] = mapped_column(Date)
+
+
+class ShipRequirement(Base):
+    """Требование клиента к сроку: крайняя дата отгрузки (срок поставки) по (сделка, sku).
+
+    Локальный кэш закупок, наполняется из продаж по событию ``sales.deal.ship_deadline.set``
+    (sales → procurement). Машина планируется так, чтобы прийти в Минск к самому раннему сроку
+    своих позиций минус буфер «последней мили» — иначе риск срыва отгрузки и штрафа.
+    ``ship_deadline`` — сырая строка из продаж; ``ship_deadline_date`` — разобранная дата (для
+    расчёта; None, если формат не распознан). soft-ref на sales.deal по ``deal_id`` (без FK).
+    """
+
+    __tablename__ = "ship_requirement"
+    __table_args__ = (
+        UniqueConstraint("deal_id", "sku_code"),  # одно требование на (сделка, номенклатура)
+        Index("ix_ship_requirement_sku", "sku_code"),
+        {"schema": "procurement"},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    deal_id: Mapped[int] = mapped_column(Integer)  # soft-ref на sales.deal (без cross-schema FK)
+    number: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    counterparty: Mapped[str] = mapped_column(String(255), default="", server_default="")
+    sku_code: Mapped[str] = mapped_column(String(64))
+    qty: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"), server_default="0")
+    ship_deadline: Mapped[str | None] = mapped_column(String(32))  # сырой срок клиента (как в продажах)
+    ship_deadline_date: Mapped[date | None] = mapped_column(Date)  # разобранная дата (для расчёта)
+    penalty_rate_pct: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))  # %/день просрочки
+    penalty_cap_pct: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))  # потолок % от суммы
+    penalty_terms: Mapped[str | None] = mapped_column(String(512))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )

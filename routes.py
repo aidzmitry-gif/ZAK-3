@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -26,6 +26,7 @@ from modules.procurement.models import (
     PurchaseRequest,
     Rfq,
     RfqBid,
+    ShipRequirement,
     Supplier,
     SupplierClaim,
     TransportMethod,
@@ -34,10 +35,12 @@ from modules.procurement.plan import (
     DEFAULT_METHODS,
     STAGE_ORDER,
     STAGE_TITLES,
+    arrival_deadline,
     build_milestone_plan,
     total_transit_days,
 )
 from modules.procurement.schemas import (
+    AtRiskDeal,
     CostEstimateOut,
     CostEstimateRequest,
     DeficitRequestIn,
@@ -1094,7 +1097,27 @@ async def _order_milestones(session: AsyncSession, order_id: int) -> list[Purcha
     )
 
 
-def _plan_out(order: PurchaseOrder, milestones: list[PurchaseOrderMilestone]) -> OrderPlanOut:
+async def _order_requirements(session: AsyncSession, order_id: int) -> list[ShipRequirement]:
+    """Требования клиентов, релевантные машине — по sku_code её позиций (срок отгрузки из продаж).
+    # ponytail: матч по sku (нет связи позиция→сделка); точная привязка — следующий слой."""
+    skus = {
+        s for s in (await session.execute(
+            select(PurchaseOrderLine.sku_code).where(PurchaseOrderLine.order_id == order_id)
+        )).scalars().all() if s
+    }
+    if not skus:
+        return []
+    return list((await session.execute(
+        select(ShipRequirement).where(ShipRequirement.sku_code.in_(skus))
+    )).scalars().all())
+
+
+def _plan_out(
+    order: PurchaseOrder,
+    milestones: list[PurchaseOrderMilestone],
+    requirements: list[ShipRequirement],
+    today: date,
+) -> OrderPlanOut:
     ms = [
         MilestoneOut(
             stage=m.stage, title=STAGE_TITLES.get(m.stage, m.stage), seq=m.seq,
@@ -1106,13 +1129,42 @@ def _plan_out(order: PurchaseOrder, milestones: list[PurchaseOrderMilestone]) ->
     start = None
     if milestones and milestones[0].planned_date is not None:
         start = milestones[0].planned_date - timedelta(days=milestones[0].duration_days)
+    target = order.target_arrival_date
+
+    # Ограничение от срока клиента: машина должна прийти к (самый ранний срок − буфер). Иначе риск.
+    dated = [r for r in requirements if r.ship_deadline_date is not None]
+    required_by = min((r.ship_deadline_date for r in dated), default=None)
+    required_arrival = arrival_deadline(required_by)
+    slack_days = (required_arrival - target).days if (required_arrival and target) else None
+    # есть срок клиента, но машина не запланирована (target=None) ИЛИ приходит позже крайней даты —
+    # риск срыва. Незапланированная машина с живым сроком — наивысший риск, не «зелёная».
+    at_risk = bool(required_arrival and (target is None or target > required_arrival))
+    if start is not None and start < today:
+        at_risk = True  # старт сбора уже в прошлом — не успеть запустить машину
+    at_risk_deals: list[AtRiskDeal] = []
+    for r in dated:
+        r_arr = arrival_deadline(r.ship_deadline_date)
+        r_slack = (r_arr - target).days if (target and r_arr) else None
+        if r_slack is not None and r_slack < 0:  # опоздание → штрафной риск
+            at_risk_deals.append(AtRiskDeal(
+                deal_id=r.deal_id, number=r.number, counterparty=r.counterparty, sku_code=r.sku_code,
+                ship_deadline=r.ship_deadline, required_arrival=r_arr, slack_days=r_slack,
+                penalty_rate_pct=float(r.penalty_rate_pct) if r.penalty_rate_pct is not None else None,
+                penalty_cap_pct=float(r.penalty_cap_pct) if r.penalty_cap_pct is not None else None,
+                penalty_terms=r.penalty_terms,
+            ))
     return OrderPlanOut(
         order_id=order.id,
         transport_method_code=order.transport_method_code,
-        target_arrival_date=order.target_arrival_date,
+        target_arrival_date=target,
         start_date=start,
         total_days=sum(m.duration_days for m in milestones),
         milestones=ms,
+        required_by=required_by,
+        required_arrival=required_arrival,
+        slack_days=slack_days,
+        at_risk=at_risk,
+        at_risk_deals=at_risk_deals,
     )
 
 
@@ -1122,7 +1174,12 @@ async def get_order_plan(order_id: int, session: AsyncSession = Depends(get_sess
     order = await session.get(PurchaseOrder, order_id)
     if order is None:
         raise HTTPException(status_code=404, detail="Заказ не найден")
-    return _plan_out(order, await _order_milestones(session, order_id))
+    return _plan_out(
+        order,
+        await _order_milestones(session, order_id),
+        await _order_requirements(session, order_id),
+        datetime.now(timezone.utc).date(),
+    )
 
 
 @router.post("/orders/{order_id}/plan", response_model=OrderPlanOut)
@@ -1142,11 +1199,21 @@ async def plan_order(
     ).scalars().first()
     if method is None:
         raise HTTPException(status_code=404, detail="Способ перевозки не найден")
+    requirements = await _order_requirements(session, order_id)
+    target = payload.target_arrival_date
+    if target is None:  # авто-подсказка: самый ранний срок клиента среди позиций − буфер
+        dated = [r.ship_deadline_date for r in requirements if r.ship_deadline_date]
+        target = arrival_deadline(min(dated)) if dated else None
+    if target is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Укажите target_arrival_date или задайте срок клиента (ship_deadline) по позициям машины",
+        )
     durations = method.durations or DEFAULT_METHODS.get(method.code, {}).get("durations", {})
-    plans, _start = build_milestone_plan(durations, payload.target_arrival_date)
+    plans, _start = build_milestone_plan(durations, target)
 
     order.transport_method_code = method.code
-    order.target_arrival_date = payload.target_arrival_date
+    order.target_arrival_date = target
     existing = {m.stage: m for m in await _order_milestones(session, order_id)}
     for p in plans:
         m = existing.get(p["stage"])
@@ -1158,7 +1225,12 @@ async def plan_order(
                 duration_days=p["duration_days"], planned_date=p["planned_date"],
             ))
     await session.commit()
-    return _plan_out(order, await _order_milestones(session, order_id))
+    return _plan_out(
+        order,
+        await _order_milestones(session, order_id),
+        requirements,
+        datetime.now(timezone.utc).date(),
+    )
 
 
 async def _mark_arrival_fact(session: AsyncSession, order_id: int, arrival_date) -> None:
