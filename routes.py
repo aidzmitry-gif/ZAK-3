@@ -738,7 +738,7 @@ async def update_order_header(
 @router.get("/orders/{order_id}/landed-preview")
 async def landed_preview(order_id: int, session: AsyncSession = Depends(get_session)):
     """Предпросмотр распределения landed cost по позициям БЕЗ фиксации (live-пересчёт в редакторе).
-    Тот же движок, что и на приёмке — фронт не считает сам."""
+    Тот же движок, что и на приёмке — включая пошлину ТН ВЭД из фасада sku_master."""
     order = await session.get(PurchaseOrder, order_id)
     if order is None:
         raise HTTPException(status_code=404, detail="Заказ не найден")
@@ -748,21 +748,38 @@ async def landed_preview(order_id: int, session: AsyncSession = Depends(get_sess
         )
     ).scalars().all()
     res, _ = _order_allocation(lines, Decimal(order.freight_byn))
-    return {
-        "order_id": order.id,
-        "freight_byn": float(order.freight_byn),
-        "lines": [
+
+    from core.services import sku_master  # фасад ядра; локальный импорт — без цикла модулей
+
+    duty_inputs = await sku_master.landed_inputs_batch(session, [r["sku_code"] for r in res["lines"]])
+    adjusted_lines = []
+    total_landed = Decimal("0")
+    for r in res["lines"]:
+        inp = duty_inputs.get(r["sku_code"])
+        duty = inp.get("duty_pct") if inp else None
+        duty_rate = Decimal(str(duty)) / Decimal("100") if duty is not None else Decimal("0")
+        unit = (r["unit_landed_cost"] * (Decimal("1") + duty_rate)).quantize(
+            Decimal("0.0001"), rounding=ROUND_HALF_UP
+        )
+        landed_total = (r["landed_total"] * (Decimal("1") + duty_rate)).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        total_landed += landed_total
+        adjusted_lines.append(
             {
                 "sku_code": r["sku_code"],
                 "goods_byn": float(r["goods_value"]),
                 "allocated_byn": float(r["allocated"]),
-                "landed_total_byn": float(r["landed_total"]),
-                "unit_landed_cost_byn": float(r["unit_landed_cost"]),
+                "landed_total_byn": float(landed_total),
+                "unit_landed_cost_byn": float(unit),
             }
-            for r in res["lines"]
-        ],
+        )
+    return {
+        "order_id": order.id,
+        "freight_byn": float(order.freight_byn),
+        "lines": adjusted_lines,
         "total_goods_byn": float(res["total_goods"]),
-        "total_landed_byn": float(res["total_landed"]),
+        "total_landed_byn": float(total_landed),
     }
 
 
