@@ -153,6 +153,7 @@ class CostRatesIn(BaseModel):
 class CostEstimateRequest(BaseModel):
     lines: list[CostEstimateLineIn]
     rates: CostRatesIn
+    operation_date: date | None = None
 
 
 class CostEstimateLineOut(BaseModel):
@@ -167,6 +168,7 @@ class CostEstimateLineOut(BaseModel):
 
 
 class CostEstimateOut(BaseModel):
+    fx_quotes: dict = Field(default_factory=dict)
     lines: list[CostEstimateLineOut]
     total_landed_byn: float
 

@@ -787,7 +787,7 @@ async def landed_preview(order_id: int, session: AsyncSession = Depends(get_sess
 
 
 @router.post("/cost-estimate", response_model=CostEstimateOut)
-async def cost_estimate(payload: CostEstimateRequest):
+async def cost_estimate(payload: CostEstimateRequest, session: AsyncSession = Depends(get_session)):
     """Предварительная (плановая) себестоимость импорта из Китая по позициям сделки/машины.
 
     Чистый расчёт без БД: цена поставщика + комиссия + страховка + фрахт + пошлина → landed
@@ -795,11 +795,19 @@ async def cost_estimate(payload: CostEstimateRequest):
     /НДС тут НЕ считаются (полоса «Маржа/ценообразование»). Ставка пошлины — на вход (авто-резолв
     из ``ref_tnved`` — Горизонт 2)."""
     r = payload.rates
+    from core.services import nbrb
+
+    on = payload.operation_date or nbrb.today()
+    try:
+        quotes = {code: await nbrb.quote(session, code, on) for code in ("USD", "RUB", "CNY")}
+    except nbrb.RateUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    usd, rub, cny = (Decimal(quotes[code]["rate"]) for code in ("USD", "RUB", "CNY"))
     rates = CostRates(
-        usd_byn=Decimal(str(r.usd_byn)),
-        cny_rub=Decimal(str(r.cny_rub)),
-        rub_byn=Decimal(str(r.rub_byn)),
-        usd_rub=Decimal(str(r.usd_rub)),
+        usd_byn=usd,
+        cny_rub=cny / rub,
+        rub_byn=rub,
+        usd_rub=usd / rub,
         commission_pct=Decimal(str(r.commission_pct)),
         insurance_pct=Decimal(str(r.insurance_pct)),
         freight_usd_per_kg=Decimal(str(r.freight_usd_per_kg)),
@@ -818,7 +826,10 @@ async def cost_estimate(payload: CostEstimateRequest):
         )
         for ln in payload.lines
     ]
-    return estimate_china_cost(lines, rates)
+    result = estimate_china_cost(lines, rates)
+    result["fx_quotes"] = quotes
+    await session.commit()
+    return result
 
 
 # ───────────────────────── Справочник поставщиков ─────────────────────────
