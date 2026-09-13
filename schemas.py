@@ -1,10 +1,12 @@
 """Pydantic-схемы модуля Procurement."""
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # Статус заказа — закрытый набор (опечатка тихо пропустила бы фиксацию landed cost на приёмке).
 # Должен совпадать с ORDER_STATUSES в models.py.
@@ -338,11 +340,10 @@ class MilestoneOut(BaseModel):
 
 class OrderPlanIn(BaseModel):
     """Запланировать машину: способ перевозки (шаблон длительностей) + дедлайн «В Минске до».
-    План этапов — обратный waterfall от ``target_arrival_date``. Если дата не задана — берётся
-    авто-подсказка: самый ранний срок клиента среди позиций − буфер последней мили."""
+    План этапов — обратный waterfall от ``target_arrival_date``. Дата обязательна: клиентские требования без scoped facade не используются."""
 
     transport_method_code: str
-    target_arrival_date: date | None = None  # None → авто из срока клиента
+    target_arrival_date: date  # explicit date; customer requirements are not authorized
 
 
 class AtRiskDeal(BaseModel):
@@ -373,3 +374,88 @@ class OrderPlanOut(BaseModel):
     slack_days: int | None = None  # required_arrival − target_arrival (<0 = опоздание)
     at_risk: bool = False  # план приходит позже крайней даты (или старт уже в прошлом)
     at_risk_deals: list[AtRiskDeal] = []
+
+
+class EditorInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def exact_decimal(cls, value, info):
+        scales = {"qty": 2, "goods_value_byn": 2, "freight_byn": 2, "weight": 3, "volume": 4}
+        if info.field_name in scales:
+            scale = scales[info.field_name]
+            if not isinstance(value, str) or not re.fullmatch(
+                rf"(?:0|[1-9][0-9]{{0,{13-scale}}})(?:\.[0-9]{{1,{scale}}})?", value
+            ):
+                raise ValueError("Use a nonnegative exact decimal string within the stored precision")
+            return Decimal(value)
+        if isinstance(value, str):
+            value = value.strip()
+            if "\x00" in value:
+                raise ValueError("NUL is forbidden")
+        return value
+
+
+class EditorLineInput(EditorInput):
+    sku_code: str = Field(min_length=1, max_length=64)
+    qty: Decimal = Field(default=Decimal("1.00"), gt=0)
+    goods_value_byn: Decimal = Decimal("0.00")
+    weight: Decimal = Decimal("0.000")
+    volume: Decimal = Decimal("0.0000")
+
+
+class EditorHeaderInput(EditorInput):
+    supplier: str = Field(default="", max_length=255)
+    supplier_id: int | None = Field(default=None, gt=0)
+    eta_date: date | None = None
+    freight_byn: Decimal = Decimal("0.00")
+
+
+class OrderMutationOut(BaseModel):
+    organization_id: int
+    principal: str
+    order_id: int
+    action: Literal["status", "add_line", "delete_line", "header"]
+    affected_line_id: int | None = None
+    status: str
+    received_at: datetime | None = None
+
+
+class ScopedOrderPlanOut(BaseModel):
+    organization_id: int
+    order_id: int
+    principal: str | None = None
+    transport_method_code: str | None = None
+    target_arrival_date: date | None = None
+    start_date: date | None = None
+    total_days: int
+    milestones: list[MilestoneOut]
+    customer_requirements_status: Literal["unverified"] = "unverified"
+    required_by: None = None
+    required_arrival: None = None
+    slack_days: None = None
+    at_risk: None = None
+    at_risk_deals: list[AtRiskDeal] = Field(default_factory=list, max_length=0)
+    schedule_start_in_past: bool | None = None
+
+
+class EditorDeleteInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    line_id: int = Field(strict=True, gt=0, le=2147483647)
+
+
+class EditorStatusInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: OrderStatus
+
+
+class EditorPlanInput(OrderPlanIn):
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("target_arrival_date", mode="before")
+    @classmethod
+    def explicit_date(cls, value):
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+            raise ValueError("Use explicit YYYY-MM-DD")
+        return value

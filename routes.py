@@ -5,14 +5,14 @@ import math
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.runtime.core import Core
 from core.runtime.deps import get_core, get_session
-from core.runtime.funnel import FunnelBoardOut, FunnelCard, build_board
+from core.runtime.funnel import FunnelBoardOut, FunnelCard
 from core.services.landed_cost import LandedExpense, LandedLine, allocate_landed_cost
 from modules.procurement.cost_estimate import CostLine, CostRates, estimate_china_cost
 from modules.procurement.models import (
@@ -31,6 +31,7 @@ from modules.procurement.models import (
     SupplierClaim,
     TransportMethod,
 )
+from modules.procurement.ownership import require_order_access, require_request_access
 from modules.procurement.plan import (
     DEFAULT_METHODS,
     STAGE_ORDER,
@@ -44,11 +45,13 @@ from modules.procurement.schemas import (
     CostEstimateOut,
     CostEstimateRequest,
     DeficitRequestIn,
+    EditorHeaderInput,
+    EditorLineInput,
     MilestoneOut,
+    OrderMutationOut,
     OrderPlanIn,
     OrderPlanOut,
     PurchaseOrderCreate,
-    PurchaseOrderHeaderUpdate,
     PurchaseOrderLineIn,
     PurchaseOrderLineOut,
     PurchaseOrderOut,
@@ -60,6 +63,7 @@ from modules.procurement.schemas import (
     RfqBidOut,
     RfqCreate,
     RfqOut,
+    ScopedOrderPlanOut,
     StageUpdate,
     SupplierClaimCreate,
     SupplierClaimOut,
@@ -70,7 +74,6 @@ from modules.procurement.schemas import (
     TransportMethodOut,
     TransportMethodUpdate,
 )
-from modules.procurement.stages import STAGES
 
 router = APIRouter(tags=["procurement"])
 
@@ -182,18 +185,12 @@ def _to_card(r: PurchaseRequest, score: float | None = None) -> FunnelCard:
 
 @router.get("/requests", response_model=list[PurchaseRequestOut])
 async def list_requests(session: AsyncSession = Depends(get_session)):
-    """Заявки на закупку (плоский список — для аналитики и совместимости)."""
-    return (
-        await session.execute(select(PurchaseRequest).order_by(PurchaseRequest.id.desc()))
-    ).scalars().all()
+    raise HTTPException(410, "Select an organization and use its procurement endpoints")
 
 
 @router.get("/board", response_model=FunnelBoardOut)
 async def board(session: AsyncSession = Depends(get_session)) -> FunnelBoardOut:
-    """Воронка закупок: заявки сгруппированы по стадиям sourcing-цикла (балл поставщика — реальный)."""
-    rows = (await session.execute(select(PurchaseRequest))).scalars().all()
-    scores = await _board_scores(session, {r.supplier_id for r in rows if r.supplier_id})
-    return build_board(STAGES, rows, lambda r: _to_card(r, scores.get(r.supplier_id)))
+    raise HTTPException(410, "Select an organization and use its procurement endpoints")
 
 
 @router.post("/requests", response_model=PurchaseRequestOut, status_code=201)
@@ -213,12 +210,13 @@ async def create_request(
     return obj
 
 
-@router.patch("/requests/{req_id}", response_model=PurchaseRequestOut)
+@router.patch("/requests/{req_id}", response_model=PurchaseRequestOut, dependencies=[Depends(require_request_access)])
 async def update_request(
     req_id: int,
     payload: StageUpdate,
     core: Core = Depends(get_core),
     session: AsyncSession = Depends(get_session),
+    organization_id: int = Depends(require_request_access),
 ):
     """Сменить стадию закупки. При «Приёмке / QC» — приход на склад (procurement → wms)."""
     obj = await session.get(PurchaseRequest, req_id)
@@ -231,6 +229,7 @@ async def update_request(
             "procurement.received",
             {
                 "item": obj.item,
+                "organization_id": organization_id,
                 "qty": obj.qty,
                 "warehouse": "Главный",
                 "entity_ref": f"purchase:{obj.id}",
@@ -443,7 +442,7 @@ async def _recompute_estimated_landed(session: AsyncSession, sku_code: str) -> D
     return unit
 
 
-async def _fixate_landed_cost(session: AsyncSession, order: PurchaseOrder, event_bus) -> None:
+async def _fixate_landed_cost(session: AsyncSession, order: PurchaseOrder, event_bus, organization_id: int) -> None:
     """На приёмке (``received``): разнести фрахт на позиции, зафиксировать себестоимость per-SKU
     (upsert), эмитить ``procurement.landed_cost.calculated`` (для sales/finance) и
     ``procurement.received`` ПО КАЖДОЙ позиции (приход на склад по себестоимости, для wms).
@@ -511,6 +510,7 @@ async def _fixate_landed_cost(session: AsyncSession, order: PurchaseOrder, event
             "procurement.landed_cost.calculated",
             {
                 "sku_code": code,
+                "organization_id": organization_id,
                 "unit_landed_cost_byn": str(unit),
                 "qty": str(agg[code]["qty"]),
                 "total_landed_byn": str(landed_total),
@@ -533,7 +533,8 @@ async def _fixate_landed_cost(session: AsyncSession, order: PurchaseOrder, event
             "procurement.received",
             {
                 "sku_code": ln.sku_code,
-                "qty": float(ln.qty),
+                "organization_id": organization_id,
+                "qty": str(ln.qty),
                 "warehouse": "Главный",  # ponytail: хардкод; апгрейд — поле warehouse на заказе
                 "entity_ref": f"purchase_order:{order.id}:{ln.id}",
                 "unit_landed_cost_byn": str(unit_by_sku.get(ln.sku_code, "")),
@@ -543,34 +544,17 @@ async def _fixate_landed_cost(session: AsyncSession, order: PurchaseOrder, event
 
 @router.get("/orders", response_model=list[PurchaseOrderOut])
 async def list_orders(session: AsyncSession = Depends(get_session)):
-    """Все заказы поставщикам с позициями (новые первыми)."""
-    orders = (
-        await session.execute(select(PurchaseOrder).order_by(PurchaseOrder.id.desc()))
-    ).scalars().all()
-    return await _orders_out(session, list(orders))
+    raise HTTPException(410, "Select an organization and use its procurement endpoints")
 
 
 @router.get("/open-orders", response_model=list[PurchaseOrderOut])
 async def open_orders(session: AsyncSession = Depends(get_session)):
-    """Открытые заказы (товар не принят) с ETA — sales вычитает «в пути» по номенклатуре.
-    Ближайший ETA первым (заказы без ETA — в конце)."""
-    orders = (
-        await session.execute(
-            select(PurchaseOrder)
-            .where(PurchaseOrder.status.in_(OPEN_ORDER_STATUSES))
-            .order_by(PurchaseOrder.eta_date.asc().nulls_last(), PurchaseOrder.id.desc())
-        )
-    ).scalars().all()
-    return await _orders_out(session, list(orders))
+    raise HTTPException(410, "Select an organization and use its procurement endpoints")
 
 
 @router.get("/orders/{order_id}", response_model=PurchaseOrderOut)
 async def get_order(order_id: int, session: AsyncSession = Depends(get_session)):
-    """Один заказ с позициями (для экрана редактора машины)."""
-    order = await session.get(PurchaseOrder, order_id)
-    if order is None:
-        raise HTTPException(status_code=404, detail="Заказ не найден")
-    return (await _orders_out(session, [order]))[0]
+    raise HTTPException(410, "Select an organization and use its procurement endpoints")
 
 
 @router.post("/orders", response_model=PurchaseOrderOut, status_code=201)
@@ -582,6 +566,8 @@ async def create_order(
     """Создать заказ поставщику с позициями. Номер генерируется, если не задан."""
     if payload.status == "cancelled":
         raise HTTPException(status_code=422, detail="Нельзя создать заказ сразу в статусе «отменён»")
+    if payload.status == RECEIVED_ORDER_STATUS:
+        raise HTTPException(422, "Создайте заказ и подтвердите юрлицо перед приёмкой")
     order = PurchaseOrder(
         supplier=payload.supplier,
         supplier_id=payload.supplier_id,
@@ -596,12 +582,6 @@ async def create_order(
         order.number = f"PO-2026-{order.id:04d}"
     for ln in payload.lines:
         session.add(_new_line(order.id, ln))
-    if order.status == RECEIVED_ORDER_STATUS:  # создан сразу принятым — зафиксировать cost
-        received = datetime.now(timezone.utc).replace(tzinfo=None)
-        order.received_at = received
-        await session.flush()
-        await _fixate_landed_cost(session, order, core.event_bus)
-        await _mark_arrival_fact(session, order.id, received.date())
     await session.commit()
     await session.refresh(order)
     return (await _orders_out(session, [order]))[0]
@@ -623,13 +603,25 @@ def _validate_transition(current: str, new: str) -> None:
         raise HTTPException(status_code=422, detail=f"Нельзя откатить статус назад: {current}→{new}")
 
 
-@router.patch("/orders/{order_id}", response_model=PurchaseOrderOut)
+def mutation_ack(order, org_id, principal, action, line_id=None):
+    return {"organization_id": org_id, "principal": principal, "order_id": order.id,
+            "action": action, "affected_line_id": line_id, "status": order.status,
+            "received_at": order.received_at}
+
+
+@router.patch("/orders/{order_id}", response_model=OrderMutationOut, dependencies=[Depends(require_order_access)])
 async def update_order_status(
     order_id: int,
     payload: PurchaseOrderStatusUpdate,
     core: Core = Depends(get_core),
     session: AsyncSession = Depends(get_session),
+    x_expected_principal: str | None = Header(default=None, min_length=1, max_length=200),
+    organization_id: int = Depends(require_order_access),
 ):
+    raise HTTPException(410, "Use durable scoped edit commands")
+
+
+async def apply_order_status(order_id, payload, core, session, organization_id, x_expected_principal):
     """Сменить статус заказа по машине состояний. Эмит ``procurement.order.status_changed`` на
     каждом переходе; при фактической приёмке (``received``) — фиксация landed cost + приход на склад."""
     order = await session.get(PurchaseOrder, order_id)
@@ -644,6 +636,7 @@ async def update_order_status(
             "procurement.order.status_changed",
             {
                 "order_id": order.id,
+                "organization_id": organization_id,
                 "number": order.number,
                 "from": current,
                 "to": payload.status,
@@ -654,11 +647,10 @@ async def update_order_status(
             # наивный UTC (как sales._utcnow): один источник времени для received_at и факта ⑦
             received = datetime.now(timezone.utc).replace(tzinfo=None)
             order.received_at = received  # факт приёмки — основа своевременности (scorecard)
-            await _fixate_landed_cost(session, order, core.event_bus)
+            await _fixate_landed_cost(session, order, core.event_bus, organization_id)
             await _mark_arrival_fact(session, order.id, received.date())  # факт ⑦ В Минске в план машины
-    await session.commit()
-    await session.refresh(order)
-    return (await _orders_out(session, [order]))[0]
+    result = mutation_ack(order, organization_id, x_expected_principal, "status")
+    return result
 
 
 # ───────────────────── Редактор состава заказа (позиции + landed-preview) ─────────────────────
@@ -684,43 +676,61 @@ async def _require_editable_order(session: AsyncSession, order_id: int) -> Purch
     return order
 
 
-@router.post("/orders/{order_id}/lines", response_model=PurchaseOrderOut, status_code=201)
+@router.post("/orders/{order_id}/lines", response_model=OrderMutationOut, status_code=201, dependencies=[Depends(require_order_access)])
 async def add_order_line(
     order_id: int,
-    payload: PurchaseOrderLineIn,
+    payload: EditorLineInput,
+    organization_id: int = Depends(require_order_access),
     session: AsyncSession = Depends(get_session),
+    x_expected_principal: str | None = Header(default=None, min_length=1, max_length=200),
 ):
+    raise HTTPException(410, "Use durable scoped edit commands")
+
+
+async def apply_add_line(order_id, payload, session, organization_id, x_expected_principal):
     """Добавить позицию в заказ (редактор машины). Нельзя для принятого заказа (409)."""
     order = await _require_editable_order(session, order_id)
-    session.add(_new_line(order.id, payload))
-    await session.commit()
-    await session.refresh(order)
-    return (await _orders_out(session, [order]))[0]
+    line = _new_line(order.id, payload)
+    session.add(line)
+    await session.flush()
+    result = mutation_ack(order, organization_id, x_expected_principal, "add_line", line.id)
+    return result
 
 
-@router.delete("/orders/{order_id}/lines/{line_id}", response_model=PurchaseOrderOut)
+@router.delete("/orders/{order_id}/lines/{line_id}", response_model=OrderMutationOut, dependencies=[Depends(require_order_access)])
 async def delete_order_line(
     order_id: int,
     line_id: int,
+    organization_id: int = Depends(require_order_access),
     session: AsyncSession = Depends(get_session),
+    x_expected_principal: str | None = Header(default=None, min_length=1, max_length=200),
 ):
+    raise HTTPException(410, "Use durable scoped edit commands")
+
+
+async def apply_delete_line(order_id, line_id, session, organization_id, x_expected_principal):
     """Убрать позицию из заказа (редактор машины). Нельзя для принятого заказа (409)."""
     order = await _require_editable_order(session, order_id)
     line = await session.get(PurchaseOrderLine, line_id)
     if line is None or line.order_id != order.id:
         raise HTTPException(status_code=404, detail="Позиция не найдена")
     await session.delete(line)
-    await session.commit()
-    await session.refresh(order)
-    return (await _orders_out(session, [order]))[0]
+    result = mutation_ack(order, organization_id, x_expected_principal, "delete_line", line_id)
+    return result
 
 
-@router.patch("/orders/{order_id}/header", response_model=PurchaseOrderOut)
+@router.patch("/orders/{order_id}/header", response_model=OrderMutationOut, dependencies=[Depends(require_order_access)])
 async def update_order_header(
     order_id: int,
-    payload: PurchaseOrderHeaderUpdate,
+    payload: EditorHeaderInput,
+    organization_id: int = Depends(require_order_access),
     session: AsyncSession = Depends(get_session),
+    x_expected_principal: str | None = Header(default=None, min_length=1, max_length=200),
 ):
+    raise HTTPException(410, "Use durable scoped edit commands")
+
+
+async def apply_order_header(order_id, payload, session, organization_id, x_expected_principal):
     """Править шапку заказа (фрахт/ETA/поставщик) в редакторе машины. Нельзя для принятого (409)."""
     order = await _require_editable_order(session, order_id)
     data = payload.model_dump(exclude_unset=True)
@@ -730,18 +740,16 @@ async def update_order_header(
             order.freight_byn = Decimal(str(freight))
     for field, value in data.items():
         setattr(order, field, value)
-    await session.commit()
-    await session.refresh(order)
-    return (await _orders_out(session, [order]))[0]
+    result = mutation_ack(order, organization_id, x_expected_principal, "header")
+    return result
 
 
 @router.get("/orders/{order_id}/landed-preview")
-async def landed_preview(order_id: int, session: AsyncSession = Depends(get_session)):
-    """Предпросмотр распределения landed cost по позициям БЕЗ фиксации (live-пересчёт в редакторе).
-    Тот же движок, что и на приёмке — включая пошлину ТН ВЭД из фасада sku_master."""
-    order = await session.get(PurchaseOrder, order_id)
-    if order is None:
-        raise HTTPException(status_code=404, detail="Заказ не найден")
+async def landed_preview(order_id: int):
+    raise HTTPException(410, "Select an organization and use its procurement endpoints")
+
+
+async def order_landed_preview(session: AsyncSession, order: PurchaseOrder):
     lines = (
         await session.execute(
             select(PurchaseOrderLine).where(PurchaseOrderLine.order_id == order.id)
@@ -768,18 +776,18 @@ async def landed_preview(order_id: int, session: AsyncSession = Depends(get_sess
         adjusted_lines.append(
             {
                 "sku_code": r["sku_code"],
-                "goods_byn": float(r["goods_value"]),
-                "allocated_byn": float(r["allocated"]),
-                "landed_total_byn": float(landed_total),
-                "unit_landed_cost_byn": float(unit),
+                "goods_byn": str(r["goods_value"]),
+                "allocated_byn": str(r["allocated"]),
+                "landed_total_byn": str(landed_total),
+                "unit_landed_cost_byn": str(unit),
             }
         )
     return {
         "order_id": order.id,
-        "freight_byn": float(order.freight_byn),
+        "freight_byn": str(order.freight_byn),
         "lines": adjusted_lines,
-        "total_goods_byn": float(res["total_goods"]),
-        "total_landed_byn": float(total_landed),
+        "total_goods_byn": str(res["total_goods"]),
+        "total_landed_byn": str(total_landed),
     }
 
 
@@ -1286,47 +1294,55 @@ def _plan_out(
     )
 
 
-@router.get("/orders/{order_id}/plan", response_model=OrderPlanOut)
-async def get_order_plan(order_id: int, session: AsyncSession = Depends(get_session)):
-    """План сбора машины: этапы с план/факт датами (обратный waterfall от «В Минске до»)."""
-    order = await session.get(PurchaseOrder, order_id)
-    if order is None:
-        raise HTTPException(status_code=404, detail="Заказ не найден")
-    return _plan_out(
-        order,
-        await _order_milestones(session, order_id),
-        await _order_requirements(session, order_id),
-        datetime.now(timezone.utc).date(),
+def owned_plan_out(org_id, order, milestones, today, principal=None):
+    start = None
+    if milestones and milestones[0].planned_date is not None:
+        start = milestones[0].planned_date - timedelta(days=milestones[0].duration_days)
+    return ScopedOrderPlanOut(
+        organization_id=org_id, principal=principal, order_id=order.id,
+        transport_method_code=order.transport_method_code,
+        target_arrival_date=order.target_arrival_date, start_date=start,
+        total_days=sum(m.duration_days for m in milestones),
+        milestones=[MilestoneOut(stage=m.stage, title=STAGE_TITLES.get(m.stage, m.stage),
+            seq=m.seq, duration_days=m.duration_days, planned_date=m.planned_date,
+            actual_date=m.actual_date) for m in milestones],
+        schedule_start_in_past=start < today if start is not None else None,
     )
 
 
-@router.post("/orders/{order_id}/plan", response_model=OrderPlanOut)
+@router.get("/orders/{order_id}/plan", response_model=OrderPlanOut)
+async def get_order_plan(order_id: int, session: AsyncSession = Depends(get_session)):
+    raise HTTPException(410, "Select an organization and use its procurement endpoints")
+
+
+@router.post("/orders/{order_id}/plan", response_model=ScopedOrderPlanOut, dependencies=[Depends(require_order_access)])
 async def plan_order(
-    order_id: int, payload: OrderPlanIn, session: AsyncSession = Depends(get_session)
+    order_id: int, payload: OrderPlanIn, session: AsyncSession = Depends(get_session),
+    organization_id: int = Depends(require_order_access),
+    x_expected_principal: str | None = Header(default=None, min_length=1, max_length=200),
 ):
+    raise HTTPException(410, "Use durable scoped edit commands")
+
+
+async def apply_order_plan(order_id, payload, session, organization_id, x_expected_principal):
     """Запланировать/пересчитать график сбора машины: способ перевозки + дедлайн «В Минске до».
     Этапы — обратный waterfall от target_arrival_date; факт (actual_date) этапов сохраняется."""
     order = await session.get(PurchaseOrder, order_id)
     if order is None:
         raise HTTPException(status_code=404, detail="Заказ не найден")
-    await _ensure_default_methods(session)
     method = (
         await session.execute(
             select(TransportMethod).where(TransportMethod.code == payload.transport_method_code)
         )
     ).scalars().first()
+    if method is None and payload.transport_method_code in DEFAULT_METHODS:
+        spec = DEFAULT_METHODS[payload.transport_method_code]
+        # Defaults are input data, not a separate write inside this command.
+        method = TransportMethod(code=payload.transport_method_code, name=spec["name"],
+                                 durations=dict(spec["durations"]))
     if method is None:
         raise HTTPException(status_code=404, detail="Способ перевозки не найден")
-    requirements = await _order_requirements(session, order_id)
     target = payload.target_arrival_date
-    if target is None:  # авто-подсказка: самый ранний срок клиента среди позиций − буфер
-        dated = [r.ship_deadline_date for r in requirements if r.ship_deadline_date]
-        target = arrival_deadline(min(dated)) if dated else None
-    if target is None:
-        raise HTTPException(
-            status_code=422,
-            detail="Укажите target_arrival_date или задайте срок клиента (ship_deadline) по позициям машины",
-        )
     durations = method.durations or DEFAULT_METHODS.get(method.code, {}).get("durations", {})
     plans, _start = build_milestone_plan(durations, target)
 
@@ -1342,13 +1358,11 @@ async def plan_order(
                 order_id=order.id, stage=p["stage"], seq=p["seq"],
                 duration_days=p["duration_days"], planned_date=p["planned_date"],
             ))
-    await session.commit()
-    return _plan_out(
-        order,
-        await _order_milestones(session, order_id),
-        requirements,
-        datetime.now(timezone.utc).date(),
-    )
+    await session.flush()
+    result = owned_plan_out(organization_id, order, await _order_milestones(session, order_id),
+                            datetime.now(timezone.utc).date(), x_expected_principal)
+    return result
+
 
 
 async def _mark_arrival_fact(session: AsyncSession, order_id: int, arrival_date) -> None:
