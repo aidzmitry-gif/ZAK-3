@@ -206,3 +206,12 @@ async def purchase_chain(org_id: int, order_id: int, ctx=Depends(current_read_sc
         "status": "complete" if not blockers else "partial",
         "blockers": blockers,
     }
+
+
+@router.get("/organizations/{org_id}/orders/{order_id}/customer-deadlines")
+async def customer_deadlines(org_id: int, order_id: int, ctx=Depends(current_read_scope)):
+    from modules.procurement.customer_deadlines import review
+
+    session, _ = ctx
+    _, order = await owned_plan_source(session, org_id, "order", order_id)
+    return await review(session, org_id, order)
