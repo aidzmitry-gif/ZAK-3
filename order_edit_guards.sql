@@ -39,8 +39,10 @@ CREATE TRIGGER record_line_edit AFTER INSERT OR DELETE ON procurement.purchase_o
 FOR EACH ROW EXECUTE FUNCTION procurement.record_line_edit();
 
 CREATE UNIQUE INDEX one_edit_receipt_per_line_action ON procurement.purchase_order_edit_command
-  (action,(result::jsonb#>>'{effect,line,id}'))
-  WHERE outcome='applied' AND action IN ('add_line','delete_line');
+  ((CASE WHEN action='save' THEN 'add_line' ELSE action END),
+   (CASE WHEN action='save' THEN result::jsonb#>>'{effect,add_line,line,id}'
+         ELSE result::jsonb#>>'{effect,line,id}' END))
+  WHERE outcome='applied' AND action IN ('add_line','delete_line','save');
 CREATE TRIGGER immutable_order_edit_command BEFORE UPDATE OR DELETE
 ON procurement.purchase_order_edit_command FOR EACH ROW
 EXECUTE FUNCTION accounting.reject_history_mutation();
@@ -51,6 +53,7 @@ EXECUTE FUNCTION accounting.reject_history_mutation();
 CREATE OR REPLACE FUNCTION procurement.guard_order_edit_receipt() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE c jsonb:=NEW.command::jsonb; r jsonb:=NEW.result::jsonb; common jsonb; actual_line jsonb;
+        line_action text; line_payload jsonb; line_effect jsonb;
 BEGIN
   PERFORM 1 FROM accounting.organization WHERE id=NEW.organization_id FOR UPDATE;
   IF NEW.request_key IS DISTINCT FROM (NEW.request_key::uuid)::text
@@ -68,6 +71,16 @@ BEGIN
   common:=jsonb_build_object('version',1,'organization_id',NEW.organization_id,
     'principal',NEW.actor,'request_key',NEW.request_key,'command_hash',NEW.command_hash,
     'order_id',NEW.target_order_id,'action',NEW.action,'outcome',NEW.outcome);
+  IF NEW.action='save' AND
+    (c->'payload'='{}'::jsonb OR EXISTS (
+       SELECT 1 FROM jsonb_object_keys(c->'payload') AS t(step)
+       WHERE step NOT IN ('add_line','header','plan','status'))
+     OR (NEW.outcome='applied' AND (
+       SELECT coalesce(jsonb_object_agg(step,c->'payload'->step),'{}'::jsonb)
+       FROM jsonb_object_keys(r->'effect') AS t(step)) IS DISTINCT FROM c->'payload')
+     OR (NEW.outcome='applied' AND jsonb_typeof(r->'effect') IS DISTINCT FROM 'object')) THEN
+    RAISE EXCEPTION 'Invalid atomic order save';
+  END IF;
   IF NEW.outcome='rejected' THEN
     IF NEW.ownership_id IS NOT NULL OR r->>'code' NOT IN
       ('command_abandoned','source_unavailable','order_not_editable','line_unavailable',
@@ -84,18 +97,21 @@ BEGIN
        OR r IS DISTINCT FROM common || jsonb_build_object('ownership_id',NEW.ownership_id,'effect',r->'effect') THEN
       RAISE EXCEPTION 'Order edit applied receipt ownership mismatch';
     END IF;
-    IF NEW.action IN ('add_line','delete_line') THEN
+    IF NEW.action IN ('add_line','delete_line') OR (NEW.action='save' AND c#>'{payload,add_line}' IS NOT NULL) THEN
+      line_action := CASE WHEN NEW.action='save' THEN 'add_line' ELSE NEW.action END;
+      line_payload := CASE WHEN NEW.action='save' THEN c#>'{payload,add_line}' ELSE c->'payload' END;
+      line_effect := CASE WHEN NEW.action='save' THEN r#>'{effect,add_line}' ELSE r->'effect' END;
       SELECT snapshot INTO actual_line FROM procurement.order_line_edit_proof
         WHERE root_transaction=txid_current() AND order_id=NEW.target_order_id
-          AND action=NEW.action AND to_jsonb(line_id)=r#>'{effect,line,id}';
-      IF actual_line IS NULL OR r->'effect' IS DISTINCT FROM jsonb_build_object('line',actual_line)
-         OR (NEW.action='add_line' AND (c->'payload') - 'sku_id' - 'sku_title' - 'sku_unit'
+          AND action=line_action AND to_jsonb(line_id)=line_effect#>'{line,id}';
+      IF actual_line IS NULL OR line_effect IS DISTINCT FROM jsonb_build_object('line',actual_line)
+         OR (line_action='add_line' AND line_payload - 'sku_id' - 'sku_title' - 'sku_unit'
              IS DISTINCT FROM actual_line-'id')
-         OR (NEW.action='add_line' AND c->'payload' ? 'sku_id' AND NOT EXISTS
-             (SELECT 1 FROM sku s WHERE s.id=(c#>>'{payload,sku_id}')::integer
-                AND s.is_active AND s.code=c#>>'{payload,sku_code}'
-                AND s.title=c#>>'{payload,sku_title}' AND s.unit=c#>>'{payload,sku_unit}'))
-         OR (NEW.action='delete_line' AND c->'payload' IS DISTINCT FROM
+         OR (line_action='add_line' AND line_payload ? 'sku_id' AND NOT EXISTS
+             (SELECT 1 FROM sku s WHERE s.id=(line_payload->>'sku_id')::integer
+                AND s.is_active AND s.code=line_payload->>'sku_code'
+                AND s.title=line_payload->>'sku_title' AND s.unit=line_payload->>'sku_unit'))
+         OR (line_action='delete_line' AND line_payload IS DISTINCT FROM
            jsonb_build_object('line_id',actual_line->'id')) THEN
         RAISE EXCEPTION 'Order edit receipt lacks matching line mutation proof';
       END IF;
