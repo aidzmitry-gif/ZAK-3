@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_serializer, model_validator
 from sqlalchemy import (
     JSON,
     CheckConstraint,
@@ -22,6 +22,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db.base import Base
+from core.domain.models import Sku
 from modules.procurement.models import PurchaseOrder, PurchaseOrderLine
 from modules.procurement.ownership import (
     OrderRequestLink,
@@ -57,6 +58,9 @@ def fixed_decimal(value, scale, positive=False):
 
 class OrderLine(CanonicalInput):
     sku_code: str = Field(strict=True, min_length=1, max_length=64)
+    sku_id: int | None = Field(default=None, strict=True, gt=0, le=2147483647)
+    sku_title: str | None = Field(default=None, strict=True, min_length=1, max_length=255)
+    sku_unit: str | None = Field(default=None, strict=True, min_length=1, max_length=16)
     qty: str = Field(strict=True)
     goods_value_byn: str = Field(strict=True)
     weight: str = Field(strict=True)
@@ -66,6 +70,18 @@ class OrderLine(CanonicalInput):
     @classmethod
     def exact(cls, value, info):
         return fixed_decimal(value, {"qty": 2, "goods_value_byn": 2, "weight": 3, "volume": 4}[info.field_name], info.field_name == "qty")
+
+    @model_validator(mode="after")
+    def paired_catalog_snapshot(self):
+        values = (self.sku_id, self.sku_title, self.sku_unit)
+        if any(value is not None for value in values) and not all(value is not None for value in values):
+            raise ValueError("SKU ID, title and unit must be supplied together")
+        return self
+
+    @model_serializer(mode="wrap")
+    def legacy_compatible_serialization(self, handler):
+        data = handler(self)
+        return {key: value for key, value in data.items() if value is not None}
 
 
 class OrderDocument(CanonicalInput):
@@ -144,7 +160,7 @@ class PurchaseOrderCreation(Base):
 event.listen(PurchaseOrderCreation, "before_update", immutable)
 event.listen(PurchaseOrderCreation, "before_delete", immutable)
 router = APIRouter(tags=["Создание заказов поставщикам"])
-REJECTION_CODES = {"request_basis_changed", "request_basis_unavailable", "request_already_linked", "command_abandoned"}
+REJECTION_CODES = {"request_basis_changed", "request_basis_unavailable", "request_already_linked", "command_abandoned", "sku_catalog_changed"}
 
 
 def basis_snapshot(owner, row):
@@ -233,7 +249,8 @@ async def validate_receipt(session, row):
         invalid()
     ids = []
     for line, original in zip(lines, document["lines"], strict=True):
-        if not isinstance(line, dict) or type(line.get("id")) is not int or line["id"] <= 0 or line != {"id": line["id"], **original}:
+        operational = {key: value for key, value in original.items() if key not in {"sku_id", "sku_title", "sku_unit"}}
+        if not isinstance(line, dict) or type(line.get("id")) is not int or line["id"] <= 0 or line != {"id": line["id"], **operational}:
             invalid()
         ids.append(line["id"])
     if len(set(ids)) != len(ids):
@@ -308,6 +325,13 @@ async def create_order(org_id: int, data: OrderCommand, ctx=Depends(plan_writer)
         if await session.scalar(select(OrderRequestLink.id).where(OrderRequestLink.request_ownership_id == request_owner.id)):
             return response(await reject_command(session, org_id, actor, data, "request_already_linked"))
     doc = data.document
+    selected = [line for line in doc.lines if line.sku_id is not None]
+    if selected:
+        rows = (await session.scalars(select(Sku).where(Sku.id.in_([line.sku_id for line in selected])).with_for_update(read=True))).all()
+        skus = {row.id: row for row in rows}
+        if any((sku := skus.get(line.sku_id)) is None or not sku.is_active or sku.code != line.sku_code
+               or sku.title != line.sku_title or sku.unit != line.sku_unit for line in selected):
+            return response(await reject_command(session, org_id, actor, data, "sku_catalog_changed"))
     order = PurchaseOrder(supplier=doc.supplier, status="draft", eta_date=date.fromisoformat(doc.eta_date) if doc.eta_date else None,
                           freight_byn=Decimal(doc.freight_byn))
     session.add(order)
