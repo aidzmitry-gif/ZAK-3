@@ -23,7 +23,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db.base import Base
-from core.domain.models import OutboxEvent
+from core.domain.models import OutboxEvent, Sku
 from core.runtime.deps import get_core
 from modules.procurement import routes
 from modules.procurement.models import PurchaseOrder, PurchaseOrderLine, TransportMethod
@@ -49,7 +49,7 @@ from modules.procurement.schemas import (
 
 Action = Literal["add_line", "delete_line", "header", "status", "plan"]
 INPUTS = {"add_line": EditorLineInput, "delete_line": EditorDeleteInput, "header": EditorHeaderInput, "status": EditorStatusInput, "plan": EditorPlanInput}
-CODES = {"command_abandoned", "source_unavailable", "order_not_editable", "line_unavailable", "transition_not_allowed", "transport_method_unavailable"}
+CODES = {"command_abandoned", "source_unavailable", "order_not_editable", "line_unavailable", "transition_not_allowed", "transport_method_unavailable", "sku_catalog_changed"}
 
 
 class EditCommand(BaseModel):
@@ -80,6 +80,10 @@ class EditCommand(BaseModel):
         if self.action == "header" and not parsed.model_fields_set:
             raise ValueError("At least one header field is required")
         data = parsed.model_dump(mode="json", exclude_unset=self.action == "header")
+        if self.action == "add_line":
+            for field in ("sku_id", "sku_title", "sku_unit"):
+                if data[field] is None:
+                    data.pop(field)
         for name, scale in {"qty": 2, "goods_value_byn": 2, "weight": 3, "volume": 4, "freight_byn": 2}.items():
             if name in data:
                 data[name] = format(Decimal(data[name]), f".{scale}f")
@@ -154,7 +158,9 @@ def valid_effect(action, payload, effect, org, order_id, actor):
         if not exact(effect, ["line"]) or not valid_line(effect["line"]):
             return False
         line = effect["line"]
-        return ({k: v for k, v in line.items() if k != "id"} == payload if action == "add_line" else line["id"] == payload["line_id"])
+        return ({k: v for k, v in line.items() if k != "id"} ==
+                {k: v for k, v in payload.items() if k not in {"sku_id", "sku_title", "sku_unit"}}
+                if action == "add_line" else line["id"] == payload["line_id"])
     if action == "header":
         return (exact(effect, ["before", "after"]) and exact(effect["before"], payload) and effect["after"] == payload
             and all((isinstance(v, str) if k in {"supplier", "freight_byn"} else v is None or type(v) is int if k == "supplier_id" else v is None or isinstance(v, str)) for k, v in effect["before"].items()))
@@ -251,9 +257,16 @@ def history_changes(row: PurchaseOrderEditCommand) -> list[dict]:
         return [{"field": "status", "before": effect["from"], "after": effect["to"]}]
     if row.action in {"add_line", "delete_line"}:
         line = effect["line"]
+        after = line if row.action == "add_line" else None
+        if after is not None and "sku_id" in row.command["payload"]:
+            after = {**line, "catalog_snapshot": {
+                "sku_id": row.command["payload"]["sku_id"],
+                "title": row.command["payload"]["sku_title"],
+                "unit": row.command["payload"]["sku_unit"],
+            }}
         return [{"field": f"lines/{line['id']}",
                  "before": line if row.action == "delete_line" else None,
-                 "after": line if row.action == "add_line" else None}]
+                 "after": after}]
     return [{"field": "plan", "before": None, "before_unknown": True, "after": {
         "transport_method_code": effect["transport_method_code"],
         "target_arrival_date": effect["target_arrival_date"],
@@ -329,6 +342,12 @@ async def execute(org_id: int, order_id: int, command: EditCommand, ctx=Depends(
         method = await session.scalar(select(TransportMethod).where(TransportMethod.code == command.payload["transport_method_code"]))
         if method is None and command.payload["transport_method_code"] not in DEFAULT_METHODS:
             code = "transport_method_unavailable"
+    if not code and command.action == "add_line" and "sku_id" in command.payload:
+        sku = await session.get(Sku, command.payload["sku_id"])
+        if (sku is None or not sku.is_active or sku.code != command.payload["sku_code"]
+                or sku.title != command.payload["sku_title"]
+                or sku.unit != command.payload["sku_unit"]):
+            code = "sku_catalog_changed"
     if code:
         return response(await persist(session, org_id, actor, command, code=code))
     payload = INPUTS[command.action].model_validate(command.payload)

@@ -3,8 +3,9 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
+from core.domain.models import Sku
 from modules.procurement.expected_reservations import PhysicalReceiptAcceptance
 from modules.procurement.models import (
     OPEN_ORDER_STATUSES,
@@ -23,6 +24,22 @@ from modules.procurement.routes import _order_milestones, order_landed_preview, 
 from modules.procurement.schemas import ScopedOrderPlanOut
 
 router = APIRouter(tags=["Organization procurement reads"])
+
+
+@router.get("/organizations/{org_id}/sku-options")
+async def sku_options(org_id: int, q: str = Query("", max_length=100),
+                      ctx=Depends(current_read_scope)):
+    session, _ = ctx
+    statement = select(Sku).where(Sku.is_active.is_(True))
+    if q.strip():
+        term = q.strip()
+        statement = statement.where(or_(Sku.code.icontains(term, autoescape=True),
+                                        Sku.title.icontains(term, autoescape=True)))
+    rows = (await session.scalars(statement.order_by(Sku.code).limit(51))).all()
+    return {"organization_id": org_id,
+            "items": [{"id": row.id, "code": row.code, "title": row.title,
+                       "unit": row.unit} for row in rows[:50]],
+            "truncated": len(rows) > 50}
 
 
 @router.get("/organizations/{org_id}/open-orders")
