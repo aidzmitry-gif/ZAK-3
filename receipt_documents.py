@@ -78,6 +78,10 @@ class ReceiptContent(Input):
     supplier_id: int | None = Field(default=None, gt=0, strict=True)
     supplier_unp: str | None = Field(default=None, max_length=32, strict=True)
     contract: str = Field(min_length=1, max_length=200)
+    contract_id: int | None = Field(default=None, gt=0, strict=True,
+                                    exclude_if=lambda value: value is None)
+    contract_basis: str | None = Field(default=None, min_length=1, max_length=500,
+                                       exclude_if=lambda value: value is None)
     warehouse: str = Field(min_length=1, max_length=200)
     explanation: str = Field(min_length=1, max_length=700)
     items: list[ReceiptItem] = Field(min_length=1, max_length=300)
@@ -86,6 +90,8 @@ class ReceiptContent(Input):
     def selected_supplier_pair(self):
         if (self.supplier_id is None) != (self.supplier_unp is None):
             raise ValueError("Supplier ID and UNP snapshot must be selected together")
+        if self.contract_id is not None and self.contract_basis is not None:
+            raise ValueError("Select a registered contract or explain the unregistered basis")
         return self
 
 
@@ -256,6 +262,7 @@ async def create_document(org_id: int, data: ReceiptCreate, ctx=Depends(scoped),
             raise HTTPException(409, "Source key already identifies a different receipt")
         return await output(session, existing)
     await validate_supplier(session, data.document)
+    await validate_contract(session, org_id, data.document)
     await validate_skus(session, data.document)
     await validate_orders(session, org_id, data.document)
     row = ReceiptDocument(organization_id=org_id, source_key=data.key, current_version=1,
@@ -290,6 +297,7 @@ async def edit_document(org_id: int, receipt_id: int, data: ReceiptEdit, ctx=Dep
     if row.status != "draft" or row.current_version != data.expected_version or await session.get(ReceiptPosting, row.id):
         raise HTTPException(409, "Receipt is not an editable draft at the expected version")
     await validate_supplier(session, data.document)
+    await validate_contract(session, org_id, data.document)
     await validate_skus(session, data.document)
     await validate_orders(session, org_id, data.document)
     row.current_version += 1
@@ -309,6 +317,27 @@ async def validate_supplier(session, document):
     if supplier is None:
         raise HTTPException(409, "Supplier or MDM identity changed; select the active supplier again")
     return supplier
+
+
+async def validate_contract(session, org_id, document):
+    if document.contract_id is None:
+        if document.contract_basis is None:
+            raise HTTPException(422, "Select a registered supplier contract or explain the unregistered basis")
+        return None
+    from modules.procurement.supplier_contracts import SupplierContract
+
+    contract = await session.scalar(select(SupplierContract).where(
+        SupplierContract.id == document.contract_id,
+        SupplierContract.organization_id == org_id,
+        SupplierContract.supplier_id == document.supplier_id,
+        SupplierContract.number == document.contract,
+        SupplierContract.is_active.is_(True),
+        SupplierContract.signed_on <= document.document_date,
+    ).with_for_update(read=True))
+    if contract is None or (contract.expires_on is not None
+                            and contract.expires_on < document.document_date):
+        raise HTTPException(409, "Supplier contract selection changed or is outside its signed dates")
+    return contract
 
 
 async def validate_skus(session, document):
@@ -378,6 +407,8 @@ async def prepare_receipt(session, org_id, receipt_id, data, *, require_current_
     facts = revision.document
     if row.status == "draft" and facts.get("supplier_id") is None:
         raise HTTPException(409, "Match the draft supplier to the catalogue before posting")
+    if row.status == "draft" and facts.get("contract_id") is None and facts.get("contract_basis") is None:
+        raise HTTPException(409, "Match the draft contract or record the unregistered basis before posting")
     if row.status == "draft" and any(
         item.get("sku_id") is None or item.get("sku_title") is None or item.get("unit") is None
         for item in facts["items"]
@@ -385,11 +416,13 @@ async def prepare_receipt(session, org_id, receipt_id, data, *, require_current_
         raise HTTPException(409, "Match every draft receipt item to the SKU catalogue before posting")
     verified_counterparty_id = frozen_counterparty_id
     if require_current_supplier:
-        supplier = await validate_supplier(session, ReceiptContent.model_validate(facts))
+        source_document = ReceiptContent.model_validate(facts)
+        supplier = await validate_supplier(session, source_document)
+        await validate_contract(session, org_id, source_document)
         verified_counterparty_id = supplier.counterparty_id
     if len(data.inventory_accounts) != len(facts["items"]):
         raise HTTPException(422, "Select an inventory account for every source line")
-    document = {**{k: v for k, v in facts.items() if k not in {"currency", "supplier", "supplier_id", "supplier_unp", "items"}},
+    document = {**{k: v for k, v in facts.items() if k not in {"currency", "supplier", "supplier_id", "supplier_unp", "contract_id", "contract_basis", "items"}},
             "source": f"procurement:receipt:{row.id}", "source_version": row.current_version,
             "counterparty": facts["supplier"], "posting_date": data.posting_date.isoformat(),
             "policy_id": data.policy_id, "settlement_account": data.settlement_account,

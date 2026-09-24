@@ -16,6 +16,7 @@ from modules.procurement.rfq_scoped import router as rfq_scoped_router
 from modules.procurement.scoped_claims import router as scoped_claims_router
 from modules.procurement.scoped_reads import router as scoped_reads_router
 from modules.procurement.source_gateway import ProcurementSourceService
+from modules.procurement.supplier_contracts import router as supplier_contract_router
 
 
 class ProcurementModule(ModuleContract):
@@ -26,6 +27,7 @@ class ProcurementModule(ModuleContract):
     def register(self, core: Core) -> None:
         core.include_router(routes.router, prefix=self.api_prefix)
         core.include_router(receipt_router, prefix=self.api_prefix)
+        core.include_router(supplier_contract_router, prefix=self.api_prefix)
         core.include_router(additional_expense_router, prefix=self.api_prefix)
         core.include_router(deal_demands_router, prefix=self.api_prefix)
         core.include_router(expected_reservations_router, prefix=self.api_prefix)
