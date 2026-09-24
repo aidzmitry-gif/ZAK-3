@@ -220,8 +220,9 @@ class SupplierClaimUpdate(BaseModel):
 
 
 class SupplierBase(BaseModel):
+    counterparty_id: int | None = Field(default=None, gt=0)
     name: str
-    unp: str = ""  # soft-ref на MDM-контрагента (провенанс)
+    unp: str = ""
     country: str = ""
     flag: str = ""
     contact_person: str = ""
@@ -239,6 +240,7 @@ class SupplierCreate(SupplierBase):
 
 
 class SupplierUpdate(BaseModel):
+    counterparty_id: int | None = Field(default=None, gt=0)
     name: str | None = None
     unp: str | None = None
     country: str | None = None

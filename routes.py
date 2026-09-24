@@ -5,14 +5,16 @@ import math
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.domain.models import Counterparty
 from core.runtime.core import Core
 from core.runtime.deps import get_core, get_session
 from core.runtime.funnel import FunnelBoardOut, FunnelCard
+from core.services import reference_query
 from core.services.landed_cost import LandedExpense, LandedLine, allocate_landed_cost
 from modules.procurement.cost_estimate import CostLine, CostRates, estimate_china_cost
 from modules.procurement.models import (
@@ -843,6 +845,34 @@ async def cost_estimate(payload: CostEstimateRequest, session: AsyncSession = De
 # ───────────────────────── Справочник поставщиков ─────────────────────────
 
 
+@router.get("/supplier-counterparties")
+async def supplier_counterparties(q: str = Query(min_length=2, max_length=100),
+                                  session: AsyncSession = Depends(get_session)):
+    """Bounded active-MDM picker for procurement users, not a list-all export."""
+    term = q.strip()
+    if len(term) < 2:
+        raise HTTPException(422, "Введите минимум два символа")
+    result = await reference_query.query(session, "core.counterparties", name=term, limit=20)
+    ids = [row["id"] for row in result["result"]]
+    parties = {party.id: party for party in (await session.scalars(
+        select(Counterparty).where(Counterparty.id.in_(ids)))).all()} if ids else {}
+    return {"items": [{"id": identity, "name": parties[identity].legal_name or parties[identity].name,
+                       "unp": parties[identity].unp or ""} for identity in ids if identity in parties]}
+
+
+async def _verify_supplier_identity(session: AsyncSession, counterparty_id: int,
+                                    name: str, unp: str, supplier_id: int | None = None) -> None:
+    """Bind only an active MDM record; never infer identity from a matching UNP."""
+    party = await session.scalar(select(Counterparty).where(
+        Counterparty.id == counterparty_id).with_for_update(read=True))
+    if (party is None or not party.is_active or party.merged_into_id is not None
+            or name != (party.legal_name or party.name) or unp != (party.unp or "")):
+        raise HTTPException(409, "Контрагент MDM изменился или недоступен; выберите его заново")
+    existing = await session.scalar(select(Supplier.id).where(Supplier.counterparty_id == counterparty_id))
+    if existing is not None and existing != supplier_id:
+        raise HTTPException(409, "Для этого контрагента уже есть профиль поставщика")
+
+
 @router.get("/suppliers", response_model=list[SupplierOut])
 async def list_suppliers(session: AsyncSession = Depends(get_session)):
     """Справочник поставщиков (новые первыми)."""
@@ -853,10 +883,16 @@ async def list_suppliers(session: AsyncSession = Depends(get_session)):
 
 @router.post("/suppliers", response_model=SupplierOut, status_code=201)
 async def create_supplier(payload: SupplierCreate, session: AsyncSession = Depends(get_session)):
-    """Завести поставщика. ``unp`` — soft-ref на MDM-контрагента (провенанс)."""
+    """New bound profiles carry a checked MDM ID; legacy unbound API remains readable."""
+    if payload.counterparty_id is not None:
+        await _verify_supplier_identity(session, payload.counterparty_id, payload.name, payload.unp)
     obj = Supplier(**payload.model_dump())
     session.add(obj)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(409, "Профиль контрагента уже существует") from exc
     await session.refresh(obj)
     return obj
 
@@ -876,9 +912,20 @@ async def update_supplier(
     obj = await session.get(Supplier, supplier_id)
     if obj is None:
         raise HTTPException(status_code=404, detail="Поставщик не найден")
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    changes = payload.model_dump(exclude_unset=True)
+    target_id = changes.get("counterparty_id", obj.counterparty_id)
+    if obj.counterparty_id is not None and target_id != obj.counterparty_id:
+        raise HTTPException(409, "Нельзя заменить подтверждённый ID контрагента поставщика")
+    if target_id is not None and {"counterparty_id", "name", "unp"}.intersection(changes):
+        await _verify_supplier_identity(session, target_id, changes.get("name", obj.name),
+                                        changes.get("unp", obj.unp), obj.id)
+    for field, value in changes.items():
         setattr(obj, field, value)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(409, "Профиль контрагента уже существует") from exc
     await session.refresh(obj)
     return obj
 

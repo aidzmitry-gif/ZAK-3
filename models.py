@@ -176,16 +176,18 @@ class LandedCost(Base):
 
 
 class Supplier(Base):
-    """Профиль поставщика закупок: рейтинг/условия/ЛПР. НЕ дубль карточки контрагента —
-    эталон контрагента в MDM ядра; ``unp`` — soft-ref на MDM по УНП (без FK).
-    Здесь живут именно закупочные атрибуты (оплата/срок/incoterms/статус)."""
+    """Закупочный профиль контрагента; старые профили без MDM ID ждут сопоставления."""
 
     __tablename__ = "supplier"
-    __table_args__ = {"schema": "procurement"}
+    __table_args__ = (
+        UniqueConstraint("counterparty_id", name="uq_supplier_counterparty"),
+        {"schema": "procurement"},
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    counterparty_id: Mapped[int | None] = mapped_column(ForeignKey("counterparty.id", ondelete="RESTRICT"))
     name: Mapped[str] = mapped_column(String(255))
-    unp: Mapped[str] = mapped_column(String(32), default="", server_default="")  # soft-ref на MDM-контрагента
+    unp: Mapped[str] = mapped_column(String(32), default="", server_default="")
     country: Mapped[str] = mapped_column(String(64), default="", server_default="")
     flag: Mapped[str] = mapped_column(String(8), default="", server_default="")
     contact_person: Mapped[str] = mapped_column(String(128), default="", server_default="")
