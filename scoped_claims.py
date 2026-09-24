@@ -8,12 +8,22 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import Field
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, UniqueConstraint, event, func, select
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+    event,
+    func,
+    select,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db.base import Base
-from core.runtime.deps import get_core
 from core.runtime.core import Core
+from core.runtime.deps import get_core
 from modules.procurement.models import PurchaseOrder, SupplierClaim
 from modules.procurement.ownership import PurchaseOwnership, current_read_scope, plan_writer
 from modules.procurement.receipt_documents import Input, immutable
@@ -87,9 +97,35 @@ class ClaimResolution(Input):
     resolution: str = Field(min_length=1, max_length=500)
 
 
+class UnassignedClaimEvidence(Input):
+    entity_ref: str = Field(pattern=r"^production:qc:[1-9][0-9]*$", max_length=128)
+    item: str = Field(min_length=1, max_length=255)
+    reason: str = Field(max_length=400)
+    order_code: str = Field(max_length=64)
+
+
+class ClaimBind(Input):
+    claim_key: UUID
+    entity_ref: str = Field(pattern=r"^production:qc:[1-9][0-9]*$", max_length=128)
+    expected_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    supplier_id: int = Field(gt=0, le=2147483647, strict=True)
+    supplier: str = Field(min_length=1, max_length=255)
+    supplier_unp: str = Field(max_length=32)
+    order_id: int | None = Field(default=None, gt=0, le=2147483647, strict=True)
+    ownership_evidence: str = Field(min_length=1, max_length=1000)
+
+
 def command_hash(command: dict) -> str:
     raw = json.dumps(command, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def source_snapshot(row: SupplierClaim) -> dict:
+    return {"id": row.id, "source": row.source, "entity_ref": row.entity_ref,
+            "item": row.item, "reason": row.reason, "order_code": row.order_code,
+            "status": row.status, "supplier_id": row.supplier_id,
+            "supplier": row.supplier,
+            "amount_byn": None if row.amount_byn is None else str(row.amount_byn)}
 
 
 def claim_out(row: SupplierClaim, owner: ClaimOwnership) -> dict:
@@ -141,6 +177,77 @@ async def create_claim(org_id: int, data: ClaimCreate, ctx=Depends(plan_writer))
                            result={}, evidence=data.ownership_evidence, actor=actor,
                            created_at=datetime.now(timezone.utc))
     result = claim_out(claim, owner)
+    owner.result = result
+    session.add(owner)
+    return result
+
+
+@router.post("/organizations/{org_id}/unassigned-claim-preview")
+async def unassigned_claim_preview(org_id: int, evidence: UnassignedClaimEvidence,
+                                   ctx=Depends(plan_writer)):
+    """Reveal a candidate only after the writer supplies matching QC facts."""
+    session, _ = ctx
+    candidates = (await session.scalars(select(SupplierClaim).where(
+        SupplierClaim.source == "production", SupplierClaim.entity_ref == evidence.entity_ref)
+        .limit(2))).all()
+    if len(candidates) != 1:
+        raise HTTPException(409, "QC claim cannot be matched uniquely")
+    claim = candidates[0]
+    if (claim.item != evidence.item or claim.reason != evidence.reason
+            or claim.order_code != evidence.order_code or claim.status != "open"
+            or claim.supplier_id is not None or claim.supplier):
+        raise HTTPException(409, "QC facts changed or do not match")
+    if await session.scalar(select(ClaimOwnership.id).where(ClaimOwnership.claim_id == claim.id)):
+        raise HTTPException(409, "Claim already belongs to a company")
+    snapshot = source_snapshot(claim)
+    return {"organization_id": org_id, "claim_id": claim.id,
+            "source_snapshot": snapshot, "source_digest": command_hash(snapshot)}
+
+
+@router.post("/organizations/{org_id}/claims/{claim_id}/bind")
+async def bind_unassigned_claim(org_id: int, claim_id: int, data: ClaimBind,
+                                ctx=Depends(plan_writer)):
+    """Assign one production scrap using its reviewed source snapshot and MDM ID."""
+    session, actor = ctx
+    command = data.model_dump(mode="json")
+    digest = command_hash(command)
+    key = str(data.claim_key)
+    existing = await session.scalar(select(ClaimOwnership).where(ClaimOwnership.claim_key == key))
+    if existing is not None:
+        if (existing.organization_id != org_id or existing.claim_id != claim_id
+                or existing.command_hash != digest or existing.command != command):
+            raise HTTPException(409, "Claim key belongs to a different command")
+        return existing.result
+    claim = await session.scalar(select(SupplierClaim).where(SupplierClaim.id == claim_id).with_for_update())
+    if (claim is None or claim.source != "production" or claim.status != "open"
+            or claim.entity_ref != data.entity_ref
+            or command_hash(source_snapshot(claim)) != data.expected_digest):
+        raise HTTPException(409, "QC claim no longer matches the reviewed source")
+    if await session.scalar(select(ClaimOwnership.id).where(ClaimOwnership.claim_id == claim_id)):
+        raise HTTPException(409, "Claim already belongs to a company")
+    if claim.supplier_id is not None or claim.supplier:
+        raise HTTPException(409, "Historical supplier identity needs a separate reconciliation")
+    supplier = await selected_supplier(session, data.supplier_id, data.supplier, data.supplier_unp)
+    if supplier is None:
+        raise HTTPException(409, "Select an active supplier from the counterparty directory")
+    order = None
+    if data.order_id is not None:
+        order = await session.scalar(select(PurchaseOrder).join(PurchaseOwnership,
+            (PurchaseOwnership.kind == "order") & (PurchaseOwnership.source_id == PurchaseOrder.id))
+            .where(PurchaseOrder.id == data.order_id, PurchaseOwnership.organization_id == org_id)
+            .with_for_update())
+        if order is None or order.supplier_id != supplier.id:
+            raise HTTPException(409, "Order does not belong to this company and supplier")
+    before = source_snapshot(claim)
+    claim.supplier_id = supplier.id
+    claim.supplier = supplier.name
+    owner = ClaimOwnership(claim_id=claim.id, claim_key=key, organization_id=org_id,
+                           order_id=order.id if order else None, command_hash=digest,
+                           command=command, result={},
+                           evidence=data.ownership_evidence, actor=actor,
+                           created_at=datetime.now(timezone.utc))
+    result = claim_out(claim, owner)
+    result["source_snapshot"] = before
     owner.result = result
     session.add(owner)
     return result
@@ -226,7 +333,8 @@ async def claim_history(org_id: int, claim_id: int, ctx=Depends(current_read_sco
         .order_by(ClaimEdit.id))).all()
     return {"organization_id": org_id, "claim_id": claim_id,
             "created": {"actor": owner.actor, "created_at": owner.created_at,
-                        "evidence": owner.evidence, "snapshot": owner.result["claim"]},
+                        "evidence": owner.evidence, "snapshot": owner.result["claim"],
+                        "source_snapshot": owner.result.get("source_snapshot")},
             "edits": [{"actor": edit.actor, "created_at": edit.created_at,
                        "before": edit.before_state, "after": edit.after_state}
                       for edit in edits]}
