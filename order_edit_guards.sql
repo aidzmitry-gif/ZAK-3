@@ -71,7 +71,7 @@ BEGIN
   IF NEW.outcome='rejected' THEN
     IF NEW.ownership_id IS NOT NULL OR r->>'code' NOT IN
       ('command_abandoned','source_unavailable','order_not_editable','line_unavailable',
-       'transition_not_allowed','transport_method_unavailable')
+       'transition_not_allowed','transport_method_unavailable','sku_catalog_changed')
        OR r->>'code' IS NULL
        OR r IS DISTINCT FROM common || jsonb_build_object('code',r->>'code','no_business_write',true) THEN
       RAISE EXCEPTION 'Order edit rejected receipt mismatch';
@@ -89,7 +89,12 @@ BEGIN
         WHERE root_transaction=txid_current() AND order_id=NEW.target_order_id
           AND action=NEW.action AND to_jsonb(line_id)=r#>'{effect,line,id}';
       IF actual_line IS NULL OR r->'effect' IS DISTINCT FROM jsonb_build_object('line',actual_line)
-         OR (NEW.action='add_line' AND c->'payload' IS DISTINCT FROM actual_line-'id')
+         OR (NEW.action='add_line' AND (c->'payload') - 'sku_id' - 'sku_title' - 'sku_unit'
+             IS DISTINCT FROM actual_line-'id')
+         OR (NEW.action='add_line' AND c->'payload' ? 'sku_id' AND NOT EXISTS
+             (SELECT 1 FROM sku s WHERE s.id=(c#>>'{payload,sku_id}')::integer
+                AND s.is_active AND s.code=c#>>'{payload,sku_code}'
+                AND s.title=c#>>'{payload,sku_title}' AND s.unit=c#>>'{payload,sku_unit}'))
          OR (NEW.action='delete_line' AND c->'payload' IS DISTINCT FROM
            jsonb_build_object('line_id',actual_line->'id')) THEN
         RAISE EXCEPTION 'Order edit receipt lacks matching line mutation proof';

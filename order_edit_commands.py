@@ -343,7 +343,8 @@ async def execute(org_id: int, order_id: int, command: EditCommand, ctx=Depends(
         if method is None and command.payload["transport_method_code"] not in DEFAULT_METHODS:
             code = "transport_method_unavailable"
     if not code and command.action == "add_line" and "sku_id" in command.payload:
-        sku = await session.get(Sku, command.payload["sku_id"])
+        sku = await session.scalar(select(Sku).where(
+            Sku.id == command.payload["sku_id"]).with_for_update(read=True))
         if (sku is None or not sku.is_active or sku.code != command.payload["sku_code"]
                 or sku.title != command.payload["sku_title"]
                 or sku.unit != command.payload["sku_unit"]):

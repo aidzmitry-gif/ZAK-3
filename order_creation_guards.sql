@@ -119,13 +119,21 @@ BEGIN
   IF jsonb_typeof(c) IS DISTINCT FROM 'object' OR jsonb_typeof(d) IS DISTINCT FROM 'object'
     OR c IS DISTINCT FROM jsonb_build_object('request_key',NEW.request_key,'document',d,
          'ownership_evidence',c->'ownership_evidence','request_basis',b)
-    OR d IS DISTINCT FROM jsonb_build_object('supplier',d->'supplier','eta_date',d->'eta_date',
+    OR (d IS DISTINCT FROM jsonb_build_object('supplier',d->'supplier','eta_date',d->'eta_date',
          'freight_byn',d->'freight_byn','lines',d->'lines')
+      AND d IS DISTINCT FROM jsonb_build_object('supplier',d->'supplier','supplier_id',d->'supplier_id',
+         'supplier_unp',d->'supplier_unp','eta_date',d->'eta_date',
+         'freight_byn',d->'freight_byn','lines',d->'lines'))
     OR NEW.request_key !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
     OR NEW.command_hash !~ '^[0-9a-f]{64}$'
     OR NEW.actor IS NULL OR length(NEW.actor) NOT BETWEEN 1 AND 200
     OR NOT procurement.order_command_text(c->'ownership_evidence',1000)
     OR NOT procurement.order_command_text(d->'supplier',255)
+    OR (d ? 'supplier_id' AND (jsonb_typeof(d->'supplier_id') IS DISTINCT FROM 'number'
+      OR (d->>'supplier_id') !~ '^[1-9][0-9]*$'
+      OR (d->>'supplier_id')::numeric > 2147483647
+      OR jsonb_typeof(d->'supplier_unp') IS DISTINCT FROM 'string'
+      OR length(d->>'supplier_unp') > 32))
     OR jsonb_typeof(d->'lines') IS DISTINCT FROM 'array'
     OR jsonb_typeof(d->'freight_byn') IS DISTINCT FROM 'string'
     OR (d->>'freight_byn') !~ '^(0|[1-9][0-9]{0,11})\.[0-9]{2}$'
@@ -139,9 +147,18 @@ BEGIN
     RAISE EXCEPTION 'Invalid order creation line count or date';
   END IF;
   FOR item IN SELECT value FROM jsonb_array_elements(d->'lines') LOOP
-    IF item IS DISTINCT FROM jsonb_build_object('sku_code',item->'sku_code','qty',item->'qty',
+    IF (item IS DISTINCT FROM jsonb_build_object('sku_code',item->'sku_code','qty',item->'qty',
         'goods_value_byn',item->'goods_value_byn','weight',item->'weight','volume',item->'volume')
+      AND item IS DISTINCT FROM jsonb_build_object('sku_code',item->'sku_code',
+        'sku_id',item->'sku_id','sku_title',item->'sku_title','sku_unit',item->'sku_unit',
+        'qty',item->'qty','goods_value_byn',item->'goods_value_byn',
+        'weight',item->'weight','volume',item->'volume'))
       OR NOT procurement.order_command_text(item->'sku_code',64)
+      OR (item ? 'sku_id' AND (jsonb_typeof(item->'sku_id') IS DISTINCT FROM 'number'
+        OR (item->>'sku_id') !~ '^[1-9][0-9]*$'
+        OR (item->>'sku_id')::numeric > 2147483647
+        OR NOT procurement.order_command_text(item->'sku_title',255)
+        OR NOT procurement.order_command_text(item->'sku_unit',16)))
       OR jsonb_typeof(item->'qty') IS DISTINCT FROM 'string'
       OR (item->>'qty') !~ '^(0|[1-9][0-9]{0,11})\.[0-9]{2}$'
       OR jsonb_typeof(item->'goods_value_byn') IS DISTINCT FROM 'string'
@@ -182,8 +199,10 @@ BEGIN
     IF NEW.order_id IS NOT NULL OR NEW.ownership_id IS NOT NULL OR NEW.request_id IS NOT NULL
       OR NEW.request_ownership_id IS NOT NULL OR NEW.link_id IS NOT NULL
       OR coalesce(NEW.result->>'code','') NOT IN
-         ('request_basis_changed','request_basis_unavailable','request_already_linked','command_abandoned')
-      OR (NEW.result->>'code' <> 'command_abandoned' AND b = 'null'::jsonb)
+         ('request_basis_changed','request_basis_unavailable','request_already_linked',
+          'command_abandoned','sku_catalog_changed','supplier_catalog_changed')
+      OR (NEW.result->>'code' IN ('request_basis_changed','request_basis_unavailable',
+                                 'request_already_linked') AND b = 'null'::jsonb)
       OR EXISTS (SELECT 1 FROM procurement.order_insert_proof WHERE root_transaction=txid_current())
       OR NEW.result::jsonb IS DISTINCT FROM expected || jsonb_build_object('code',NEW.result->>'code','no_business_write',true) THEN
       RAISE EXCEPTION 'Invalid rejected order creation outcome';
@@ -196,12 +215,16 @@ BEGIN
   IF o.id IS NULL OR owner_row.id IS NULL OR owner_row.kind IS DISTINCT FROM 'order'
     OR owner_row.source_id IS DISTINCT FROM o.id OR owner_row.organization_id IS DISTINCT FROM NEW.organization_id
     OR owner_row.actor IS DISTINCT FROM NEW.actor OR owner_row.evidence IS DISTINCT FROM c->>'ownership_evidence'
-    OR o.status IS DISTINCT FROM 'draft' OR o.received_at IS NOT NULL OR o.supplier_id IS NOT NULL
+    OR o.status IS DISTINCT FROM 'draft' OR o.received_at IS NOT NULL
+    OR o.supplier_id IS DISTINCT FROM (d->>'supplier_id')::integer
     OR o.transport_method_code IS NOT NULL OR o.target_arrival_date IS NOT NULL
     OR o.supplier IS DISTINCT FROM d->>'supplier' OR o.freight_byn IS DISTINCT FROM (d->>'freight_byn')::numeric
     OR o.eta_date::text IS DISTINCT FROM d->>'eta_date'
     OR owner_row.snapshot::jsonb IS DISTINCT FROM jsonb_build_object('number',o.number,'supplier',o.supplier,
-         'supplier_id',NULL,'status','draft','eta_date',d->'eta_date') THEN
+         'supplier_id',o.supplier_id,'status','draft','eta_date',d->'eta_date')
+    OR (d ? 'supplier_id' AND NOT EXISTS (SELECT 1 FROM procurement.supplier s
+        WHERE s.id=o.supplier_id AND s.status='active' AND s.name=d->>'supplier'
+          AND s.unp=d->>'supplier_unp')) THEN
     RAISE EXCEPTION 'Order creation initial ownership/header mismatch';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM procurement.order_insert_proof WHERE order_id=o.id AND root_transaction=txid_current()) THEN
@@ -211,9 +234,19 @@ BEGIN
     'goods_value_byn',goods_value_byn::text,'weight',weight::text,'volume',volume::text) ORDER BY id)
     INTO actual_lines FROM procurement.purchase_order_line WHERE order_id=o.id;
   IF (SELECT jsonb_agg(value - 'id' ORDER BY ordinal)
-      FROM jsonb_array_elements(actual_lines) WITH ORDINALITY AS lines(value,ordinal)) IS DISTINCT FROM d->'lines' THEN
+      FROM jsonb_array_elements(actual_lines) WITH ORDINALITY AS lines(value,ordinal)) IS DISTINCT FROM
+     (SELECT jsonb_agg(value - 'sku_id' - 'sku_title' - 'sku_unit' ORDER BY ordinal)
+      FROM jsonb_array_elements(d->'lines') WITH ORDINALITY AS lines(value,ordinal)) THEN
     RAISE EXCEPTION 'Order creation initial lines mismatch';
   END IF;
+  FOR item IN SELECT value FROM jsonb_array_elements(d->'lines') LOOP
+    IF item ? 'sku_id' AND NOT EXISTS (SELECT 1 FROM sku s
+        WHERE s.id=(item->>'sku_id')::integer AND s.is_active
+          AND s.code=item->>'sku_code' AND s.title=item->>'sku_title'
+          AND s.unit=item->>'sku_unit') THEN
+      RAISE EXCEPTION 'Order creation catalog SKU changed';
+    END IF;
+  END LOOP;
   snapshot := 'null'::jsonb;
   IF b = 'null'::jsonb THEN
     IF NEW.request_id IS NOT NULL OR NEW.request_ownership_id IS NOT NULL OR NEW.link_id IS NOT NULL THEN
