@@ -51,7 +51,8 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
 - Выбор победителя общего RFQ не публикует `procurement.po.drafted`: без юрлица и подтверждённого
   поставщика заказ и платёжный прогноз создавать нельзя. Подписчик finance остаётся для будущего
   подтверждённого заказа с организационной принадлежностью.
-- **Публикует** (emit): `procurement.claim.resolved` — при закрытии претензии (resolved/rejected).
+- **Публикует** (emit): `procurement.claim.resolution_recorded` — подтверждённое решение
+  претензии указанного юрлица; событие не является подтверждением поступления денег.
   payload: `{claim_id, supplier_id, claim_type, amount_byn (str|None), resolution, status,
   order_id (int|None), entity_ref:"claim:<id>"}`. Для finance/качества. `order_id` — резолв
   `order_code`→`PurchaseOrder.number` (None, если претензия не привязана к заказу).
@@ -118,9 +119,11 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
     `amount_byn` (Numeric|None — заявленная сумма), `resolution` (str — как урегулировано),
     `status` (`open`→`resolved`/`rejected`), `source` (`production` авто / `manual` ручная),
     `entity_ref`, `created_at`.
-  - Создаётся авто (`on_production_scrap` при браке в ОТК) ИЛИ вручную (`POST /claims`).
+  - Создаётся авто (`on_production_scrap` при браке в ОТК) без юрлица либо вручную через
+    `/organizations/{org_id}/claims` с подтверждённым MDM-поставщиком и основанием владельца.
 - **`supplier`** (`Supplier`) — профиль поставщика закупок (НЕ дубль контрагента, эталон в MDM):
-  - `id` (PK), `name`, `unp` (soft-ref на MDM-контрагента, провенанс), `country`/`flag`,
+  - `id` (PK), `counterparty_id` (FK к MDM для новых профилей; старые без ID требуют сопоставления),
+    `name`/`unp` (снимок MDM), `country`/`flag`,
     `contact_person`/`phone`/`email`, `payment_terms`, `lead_time_days` (int|None), `incoterms`,
     `status` (active/blocked), `notes`, `created_at`.
 - **`rfq`** (`Rfq`) — запрос цен/тендер: `id`, `item`, `sku_code` (soft-ref), `qty`, `request_id`
@@ -179,9 +182,10 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
 - `POST /procurement/rfq/{id}/award` — выбрать победителя (`is_winner`, status=awarded, эмит `rfq.awarded`);
   заказ не создаётся, `created_order_id=null`. Закупщик выбирает юрлицо и создаёт заказ через
   `/organizations/{org_id}/orders` после сверки поставщика. Повтор award → 409.
-- `GET /procurement/claims` — претензии (`list[SupplierClaimOut]`, новые первыми).
-- `POST /procurement/claims` — ручное заведение претензии (source=manual).
-- `PATCH /procurement/claims/{claim_id}` — назначить поставщика / урегулировать; при resolved/rejected — эмит `claim.resolved` (404 если не найдена).
+- Общие `GET/POST /procurement/claims` и `PATCH /procurement/claims/{id}` возвращают 410.
+- `GET/POST /procurement/organizations/{org_id}/claims` — журнал и создание ручной претензии
+  с явным юрлицом; `POST .../{id}/resolve` сохраняет решение, `GET .../{id}/history` — аудит.
+  Автоматические претензии без владельца исключены из реестра до отдельной сверки.
 
 ## Межмодульные связи и зависимости
 - **procurement → wms:** событие `procurement.received` (приход на склад). Прямых вызовов других модулей нет.
