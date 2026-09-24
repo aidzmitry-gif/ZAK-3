@@ -319,6 +319,8 @@ async def create_order(org_id: int, data: OrderCommand, ctx=Depends(plan_writer)
     existing = await saved_outcome(session, org_id, actor, data)
     if existing is not None:
         return response(existing)
+    if data.document.supplier_id is None:
+        raise HTTPException(422, "Select supplier from procurement catalogue")
     request_owner = request = snapshot = None
     if data.request_basis:
         basis = data.request_basis
@@ -334,11 +336,10 @@ async def create_order(org_id: int, data: OrderCommand, ctx=Depends(plan_writer)
         if await session.scalar(select(OrderRequestLink.id).where(OrderRequestLink.request_ownership_id == request_owner.id)):
             return response(await reject_command(session, org_id, actor, data, "request_already_linked"))
     doc = data.document
-    if doc.supplier_id is not None:
-        from modules.procurement.supplier_identity import selected_supplier
+    from modules.procurement.supplier_identity import selected_supplier
 
-        if await selected_supplier(session, doc.supplier_id, doc.supplier, doc.supplier_unp) is None:
-            return response(await reject_command(session, org_id, actor, data, "supplier_catalog_changed"))
+    if await selected_supplier(session, doc.supplier_id, doc.supplier, doc.supplier_unp) is None:
+        return response(await reject_command(session, org_id, actor, data, "supplier_catalog_changed"))
     selected = [line for line in doc.lines if line.sku_id is not None]
     if selected:
         rows = (await session.scalars(select(Sku).where(Sku.id.in_([line.sku_id for line in selected])).with_for_update(read=True))).all()
