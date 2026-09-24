@@ -15,7 +15,7 @@ from core.db.base import Base
 from core.runtime.core import Core
 from core.runtime.deps import get_core
 from modules.procurement.models import PurchaseRequest, Rfq, RfqBid, Supplier
-from modules.procurement.ownership import PurchaseOwnership, current_read_scope
+from modules.procurement.ownership import PurchaseOwnership, current_read_scope, plan_context
 from modules.procurement.receipt_documents import Input, exact, immutable
 from modules.procurement.routes import _bids_of, _rfq_out
 from modules.procurement.supplier_identity import active_bound_suppliers
@@ -95,6 +95,11 @@ async def history(session, org_id: int, rfq_id: int):
              "after": row.after_state, "actor": row.actor, "created_at": row.created_at} for row in rows]
 
 
+async def write_scope(org_id: int, ctx=Depends(plan_context)):
+    session, gateway, user = ctx
+    return session, await gateway.source_write_authority(session, org_id, user)
+
+
 @router.get("/organizations/{org_id}/rfq")
 async def list_owned(org_id: int, after_id: int = Query(0, ge=0), ctx=Depends(current_read_scope)):
     session, _ = ctx
@@ -114,7 +119,7 @@ async def list_owned(org_id: int, after_id: int = Query(0, ge=0), ctx=Depends(cu
 
 
 @router.post("/organizations/{org_id}/rfq", status_code=201)
-async def create(org_id: int, data: Create, ctx=Depends(current_read_scope)):
+async def create(org_id: int, data: Create, ctx=Depends(write_scope)):
     session, actor = ctx
     key = str(data.request_key)
     existing = await session.scalar(select(Rfq).where(Rfq.request_key == key))
@@ -156,7 +161,7 @@ async def document_history(org_id: int, rfq_id: int, ctx=Depends(current_read_sc
 
 
 @router.post("/organizations/{org_id}/rfq/{rfq_id}/bids", status_code=201)
-async def add_bid(org_id: int, rfq_id: int, data: Bid, ctx=Depends(current_read_scope)):
+async def add_bid(org_id: int, rfq_id: int, data: Bid, ctx=Depends(write_scope)):
     session, actor = ctx
     rfq = await owned(session, org_id, rfq_id, lock=True)
     key = str(data.bid_key)
@@ -185,7 +190,7 @@ async def add_bid(org_id: int, rfq_id: int, data: Bid, ctx=Depends(current_read_
 
 @router.post("/organizations/{org_id}/rfq/{rfq_id}/award")
 async def award(org_id: int, rfq_id: int, data: Award, core: Core = Depends(get_core),
-                ctx=Depends(current_read_scope)):
+                ctx=Depends(write_scope)):
     session, actor = ctx
     rfq = await owned(session, org_id, rfq_id, lock=True)
     bids = await _bids_of(session, rfq_id)
