@@ -271,14 +271,10 @@ async def edit_document(org_id: int, receipt_id: int, data: ReceiptEdit, ctx=Dep
 async def validate_supplier(session, document):
     if document.supplier_id is None:
         raise HTTPException(422, "Select supplier from procurement catalogue")
-    from modules.procurement.models import Supplier
+    from modules.procurement.supplier_identity import selected_supplier
 
-    supplier = await session.scalar(select(Supplier).where(
-        Supplier.id == document.supplier_id).with_for_update(read=True)
-        .execution_options(populate_existing=True))
-    if (supplier is None or supplier.status != "active" or supplier.name != document.supplier
-            or supplier.unp != document.supplier_unp):
-        raise HTTPException(409, "Supplier catalogue changed; select the active supplier again")
+    if await selected_supplier(session, document.supplier_id, document.supplier, document.supplier_unp) is None:
+        raise HTTPException(409, "Supplier or MDM identity changed; select the active supplier again")
 
 
 async def validate_orders(session, org_id, document):
@@ -308,7 +304,7 @@ async def validate_orders(session, org_id, document):
                 raise HTTPException(409, "Receipt order line must match the exact order and SKU")
 
 
-async def prepare_receipt(session, org_id, receipt_id, data):
+async def prepare_receipt(session, org_id, receipt_id, data, *, require_current_supplier=False):
     row = await session.scalar(select(ReceiptDocument).where(
         ReceiptDocument.id == receipt_id, ReceiptDocument.organization_id == org_id,
     ).with_for_update())
@@ -324,6 +320,8 @@ async def prepare_receipt(session, org_id, receipt_id, data):
     facts = revision.document
     if row.status == "draft" and facts.get("supplier_id") is None:
         raise HTTPException(409, "Match the draft supplier to the catalogue before posting")
+    if require_current_supplier:
+        await validate_supplier(session, ReceiptContent.model_validate(facts))
     if len(data.inventory_accounts) != len(facts["items"]):
         raise HTTPException(422, "Select an inventory account for every source line")
     return {**{k: v for k, v in facts.items() if k not in {"currency", "supplier", "supplier_id", "supplier_unp", "items"}},
@@ -338,7 +336,7 @@ async def prepare_receipt(session, org_id, receipt_id, data):
 async def preview_document(org_id: int, receipt_id: int, data: ReceiptAccounts, ctx=Depends(context)):
     session, gateway, user = ctx
     await gateway.source_member(session, org_id, user)
-    document = await prepare_receipt(session, org_id, receipt_id, data)
+    document = await prepare_receipt(session, org_id, receipt_id, data, require_current_supplier=True)
     return await gateway.receipt_posting(session, org_id, user, document, confirm_digest=None)
 
 
@@ -351,9 +349,10 @@ async def confirm_document(org_id: int, receipt_id: int, data: ReceiptConfirm, c
 async def confirm_receipt(session, org_id, receipt_id, data, user, gateway, event_bus):
     """Canonical atomic command shared by procurement and accounting entry points."""
     actor = await gateway.source_member(session, org_id, user)
-    document = await prepare_receipt(session, org_id, receipt_id, data)
-    options = data.model_dump(mode="json", exclude={"digest"})
     previous = await session.get(ReceiptPosting, receipt_id)
+    document = await prepare_receipt(session, org_id, receipt_id, data,
+                                     require_current_supplier=previous is None)
+    options = data.model_dump(mode="json", exclude={"digest"})
     if previous and (previous.options != options or previous.digest != data.digest):
         raise HTTPException(409, "Receipt already posted with different accounting settings")
     result = await gateway.receipt_posting(session, org_id, user, document,

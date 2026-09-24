@@ -23,6 +23,7 @@ from modules.procurement.ownership import (
 from modules.procurement.receipt_documents import ReceiptDocument, ReceiptPosting, ReceiptRevision
 from modules.procurement.routes import _order_milestones, order_landed_preview, owned_plan_out
 from modules.procurement.schemas import ScopedOrderPlanOut
+from modules.procurement.supplier_identity import active_bound_suppliers
 
 router = APIRouter(tags=["Organization procurement reads"])
 
@@ -47,7 +48,7 @@ async def sku_options(org_id: int, q: str = Query("", max_length=100),
 async def supplier_options(org_id: int, q: str = Query("", max_length=100),
                            ctx=Depends(current_read_scope)):
     session, _ = ctx
-    statement = select(Supplier).where(Supplier.status == "active")
+    statement = active_bound_suppliers()
     if q.strip():
         term = q.strip()
         statement = statement.where(or_(Supplier.name.icontains(term, autoescape=True),

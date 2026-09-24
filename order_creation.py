@@ -23,7 +23,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db.base import Base
 from core.domain.models import Sku
-from modules.procurement.models import PurchaseOrder, PurchaseOrderLine, Supplier
+from modules.procurement.models import PurchaseOrder, PurchaseOrderLine
 from modules.procurement.ownership import (
     OrderRequestLink,
     PurchaseOwnership,
@@ -335,9 +335,9 @@ async def create_order(org_id: int, data: OrderCommand, ctx=Depends(plan_writer)
             return response(await reject_command(session, org_id, actor, data, "request_already_linked"))
     doc = data.document
     if doc.supplier_id is not None:
-        supplier = await session.scalar(select(Supplier).where(Supplier.id == doc.supplier_id).with_for_update(read=True))
-        if (supplier is None or supplier.status != "active" or supplier.name != doc.supplier
-                or supplier.unp != doc.supplier_unp):
+        from modules.procurement.supplier_identity import selected_supplier
+
+        if await selected_supplier(session, doc.supplier_id, doc.supplier, doc.supplier_unp) is None:
             return response(await reject_command(session, org_id, actor, data, "supplier_catalog_changed"))
     selected = [line for line in doc.lines if line.sku_id is not None]
     if selected:
