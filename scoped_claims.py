@@ -96,9 +96,11 @@ def claim_out(row: SupplierClaim, owner: ClaimOwnership) -> dict:
     created_at = owner.created_at
     if created_at.tzinfo is None:
         created_at = created_at.replace(tzinfo=timezone.utc)
+    claim = SupplierClaimOut.model_validate(row).model_dump(mode="json")
+    claim["amount_byn"] = None if row.amount_byn is None else str(row.amount_byn)
     return {"organization_id": owner.organization_id,
             "order_id": owner.order_id,
-            "claim": SupplierClaimOut.model_validate(row).model_dump(mode="json"),
+            "claim": claim,
             "ownership": {"actor": owner.actor, "created_at": created_at.isoformat(),
                           "evidence": owner.evidence}}
 

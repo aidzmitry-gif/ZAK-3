@@ -80,7 +80,6 @@ router = APIRouter(tags=["procurement"])
 
 # Переход в эту стадию воронки = товар физически принят → приход на склад (procurement → wms).
 RECEIVED_STAGE = "qc"
-CLAIM_CLOSED_STATUSES = ("resolved", "rejected")
 
 
 # ───────────────────────── Скоринг поставщика (чистая функция) ─────────────────────────
@@ -973,22 +972,12 @@ async def award_rfq(
 
 @router.get("/claims", response_model=list[SupplierClaimOut])
 async def list_claims(session: AsyncSession = Depends(get_session)):
-    """Претензии поставщикам (брак из производства и пр.), новые первыми."""
-    return (
-        await session.execute(select(SupplierClaim).order_by(SupplierClaim.id.desc()))
-    ).scalars().all()
+    raise HTTPException(410, "Select an organization and use its supplier claim register")
 
 
 @router.post("/claims", response_model=SupplierClaimOut, status_code=201)
 async def create_claim(payload: SupplierClaimCreate, session: AsyncSession = Depends(get_session)):
-    """Ручное заведение претензии закупщиком (источник ``manual``)."""
-    data = payload.model_dump()
-    data["amount_byn"] = None if data["amount_byn"] is None else Decimal(str(data["amount_byn"]))
-    obj = SupplierClaim(**data, status="open", source="manual")
-    session.add(obj)
-    await session.commit()
-    await session.refresh(obj)
-    return obj
+    raise HTTPException(410, "Select an organization and use its supplier claim command")
 
 
 @router.patch("/claims/{claim_id}", response_model=SupplierClaimOut)
@@ -998,42 +987,7 @@ async def update_claim(
     core: Core = Depends(get_core),
     session: AsyncSession = Depends(get_session),
 ):
-    """Назначить поставщика / урегулировать претензию. При resolved/rejected — эмит
-    ``procurement.claim.resolved`` (finance/качество подпишутся)."""
-    obj = await session.get(SupplierClaim, claim_id)
-    if obj is None:
-        raise HTTPException(status_code=404, detail="Претензия не найдена")
-    was_closed = obj.status in CLAIM_CLOSED_STATUSES
-    for field, value in payload.model_dump(exclude_unset=True).items():
-        setattr(obj, field, value)
-    if not was_closed and obj.status in CLAIM_CLOSED_STATUSES:
-        # P6: резолв номера заказа (order_code → PurchaseOrder.number) для finance. None, если
-        # претензия не привязана к заказу. Себестоимость НЕ пересчитываем (риск порчи факт-cost).
-        # ponytail: фактический пересчёт unit_landed_cost по возврату — Горизонт 2.
-        order_id = None
-        if obj.order_code:
-            order_id = (
-                await session.execute(
-                    select(PurchaseOrder.id).where(PurchaseOrder.number == obj.order_code)
-                )
-            ).scalar_one_or_none()
-        core.event_bus.emit(
-            session,
-            "procurement.claim.resolved",
-            {
-                "claim_id": obj.id,
-                "supplier_id": obj.supplier_id,
-                "claim_type": obj.claim_type,
-                "amount_byn": None if obj.amount_byn is None else str(obj.amount_byn),
-                "resolution": obj.resolution,
-                "status": obj.status,
-                "order_id": order_id,
-                "entity_ref": f"claim:{obj.id}",
-            },
-        )
-    await session.commit()
-    await session.refresh(obj)
-    return obj
+    raise HTTPException(410, "Select an organization and use its supplier claim command")
 
 
 # ───────────────────────── План сбора машины (этапы Китай → Минск) ─────────────────────────
