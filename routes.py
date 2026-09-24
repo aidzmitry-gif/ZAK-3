@@ -981,63 +981,24 @@ async def _bids_of(session: AsyncSession, rfq_id: int) -> list[RfqBid]:
 
 @router.get("/rfq", response_model=list[RfqOut])
 async def list_rfq(session: AsyncSession = Depends(get_session)):
-    """Запросы цен (новые первыми) с предложениями и пометкой лучшей цены."""
-    rfqs = (await session.execute(select(Rfq).order_by(Rfq.id.desc()))).scalars().all()
-    ids = [r.id for r in rfqs]
-    bids_by_rfq: dict[int, list[RfqBid]] = {}
-    if ids:
-        for b in (await session.execute(select(RfqBid).where(RfqBid.rfq_id.in_(ids)))).scalars().all():
-            bids_by_rfq.setdefault(b.rfq_id, []).append(b)
-    return [_rfq_out(r, bids_by_rfq.get(r.id, [])) for r in rfqs]
+    raise HTTPException(410, "Select an organization and an owned purchase request")
 
 
 @router.post("/rfq", response_model=RfqOut, status_code=201)
 async def create_rfq(payload: RfqCreate, session: AsyncSession = Depends(get_session)):
-    """Создать запрос цен (тендер)."""
-    rfq = Rfq(
-        item=payload.item,
-        sku_code=payload.sku_code,
-        qty=Decimal(str(payload.qty)),
-        request_id=payload.request_id,
-        due_date=payload.due_date,
-    )
-    session.add(rfq)
-    await session.commit()
-    await session.refresh(rfq)
-    return _rfq_out(rfq, [])
+    raise HTTPException(410, "Select an organization and an owned purchase request")
 
 
 @router.get("/rfq/{rfq_id}", response_model=RfqOut)
 async def get_rfq(rfq_id: int, session: AsyncSession = Depends(get_session)):
-    rfq = await session.get(Rfq, rfq_id)
-    if rfq is None:
-        raise HTTPException(status_code=404, detail="Запрос цен не найден")
-    return _rfq_out(rfq, await _bids_of(session, rfq_id))
+    raise HTTPException(410, "Select an organization and use its RFQ route")
 
 
 @router.post("/rfq/{rfq_id}/bids", response_model=RfqOut, status_code=201)
 async def add_rfq_bid(
     rfq_id: int, payload: RfqBidIn, session: AsyncSession = Depends(get_session)
 ):
-    """Добавить предложение поставщика к запросу цен."""
-    rfq = await session.get(Rfq, rfq_id)
-    if rfq is None:
-        raise HTTPException(status_code=404, detail="Запрос цен не найден")
-    if rfq.status != "open":
-        raise HTTPException(status_code=409, detail="Запрос цен закрыт — предложения не принимаются")
-    session.add(
-        RfqBid(
-            rfq_id=rfq_id,
-            supplier_id=payload.supplier_id,
-            price_byn=Decimal(str(payload.price_byn)),
-            lead_time_days=payload.lead_time_days,
-            incoterms=payload.incoterms,
-            note=payload.note,
-        )
-    )
-    await session.commit()
-    await session.refresh(rfq)
-    return _rfq_out(rfq, await _bids_of(session, rfq_id))
+    raise HTTPException(410, "Select an organization and use its RFQ route")
 
 
 @router.post("/rfq/{rfq_id}/award", response_model=RfqOut)
@@ -1047,34 +1008,7 @@ async def award_rfq(
     core: Core = Depends(get_core),
     session: AsyncSession = Depends(get_session),
 ):
-    """Выбрать победителя тендера: пометить bid победителем, закрыть RFQ, эмит ``procurement.rfq.awarded``."""
-    rfq = await session.get(Rfq, rfq_id)
-    if rfq is None:
-        raise HTTPException(status_code=404, detail="Запрос цен не найден")
-    if rfq.status != "open":
-        raise HTTPException(status_code=409, detail="Запрос цен уже закрыт — победитель выбран/отменён")
-    bids = await _bids_of(session, rfq_id)
-    winner = next((b for b in bids if b.id == payload.bid_id), None)
-    if winner is None:
-        raise HTTPException(status_code=404, detail="Предложение не найдено в этом запросе")
-    for b in bids:
-        b.is_winner = b.id == winner.id
-    rfq.status = "awarded"
-    core.event_bus.emit(
-        session,
-        "procurement.rfq.awarded",
-        {
-            "rfq_id": rfq.id,
-            "supplier_id": winner.supplier_id,
-            "price_byn": str(winner.price_byn),
-            "sku_code": rfq.sku_code,
-            "entity_ref": f"rfq:{rfq.id}",
-        },
-    )
-
-    await session.commit()
-    await session.refresh(rfq)
-    return _rfq_out(rfq, await _bids_of(session, rfq_id))
+    raise HTTPException(410, "Select an organization and use its RFQ route")
 
 
 # ───────────────────────── Претензии поставщикам ─────────────────────────

@@ -206,9 +206,12 @@ class Rfq(Base):
     """Запрос цен (тендер закупки): по позиции/номенклатуре собираем предложения поставщиков."""
 
     __tablename__ = "rfq"
-    __table_args__ = {"schema": "procurement"}
+    __table_args__ = (UniqueConstraint("request_key", name="uq_rfq_request_key"), {"schema": "procurement"})
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # New organization-scoped RFQs use this idempotency key. Historic RFQs stay NULL
+    # until their request and legal entity have been reconciled by an operator.
+    request_key: Mapped[str | None] = mapped_column(String(36))
     item: Mapped[str] = mapped_column(String(255), default="", server_default="")
     sku_code: Mapped[str] = mapped_column(String(64), default="", server_default="")  # soft-ref на 1С-код
     qty: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("1"), server_default="1")
@@ -224,10 +227,12 @@ class RfqBid(Base):
     __tablename__ = "rfq_bid"
     __table_args__ = (
         Index("ix_rfq_bid_rfq", "rfq_id"),
+        UniqueConstraint("bid_key", name="uq_rfq_bid_key"),
         {"schema": "procurement"},
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    bid_key: Mapped[str | None] = mapped_column(String(36))
     rfq_id: Mapped[int] = mapped_column(ForeignKey("procurement.rfq.id", ondelete="CASCADE"))
     supplier_id: Mapped[int | None] = mapped_column(Integer)  # soft-ref на procurement.supplier
     price_byn: Mapped[Decimal] = mapped_column(Numeric(14, 2))

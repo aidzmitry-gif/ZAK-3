@@ -12,6 +12,7 @@ from modules.procurement.order_creation import router as order_creation_router
 from modules.procurement.order_edit_commands import router as order_edit_router
 from modules.procurement.ownership import router as ownership_router
 from modules.procurement.receipt_documents import router as receipt_router
+from modules.procurement.rfq_scoped import router as rfq_scoped_router
 from modules.procurement.scoped_reads import router as scoped_reads_router
 from modules.procurement.source_gateway import ProcurementSourceService
 
@@ -31,6 +32,7 @@ class ProcurementModule(ModuleContract):
         core.include_router(order_creation_router, prefix=self.api_prefix)
         core.include_router(order_edit_router, prefix=self.api_prefix)
         core.include_router(scoped_reads_router, prefix=self.api_prefix)
+        core.include_router(rfq_scoped_router, prefix=self.api_prefix)
         # брак в производстве → автопретензия поставщику (production → procurement, §2.5)
         core.subscribe("production.scrap", events.on_production_scrap)
         # дефицит склада → авто-черновик заявки на закупку (wms → procurement, MRP-lite, круг 3)
