@@ -1,17 +1,20 @@
 """Organization-owned operational reads; customer requirements remain unverified."""
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import or_, select
 
 from core.domain.models import Sku
 from modules.procurement.expected_reservations import PhysicalReceiptAcceptance
 from modules.procurement.models import (
     OPEN_ORDER_STATUSES,
+    RECEIVED_ORDER_STATUS,
     PurchaseOrder,
     PurchaseOrderLine,
     PurchaseRequest,
+    Rfq,
+    RfqBid,
     Supplier,
 )
 from modules.procurement.ownership import (
@@ -57,6 +60,38 @@ async def supplier_options(org_id: int, q: str = Query("", max_length=100),
     return {"organization_id": org_id,
             "items": [{"id": row.id, "name": row.name, "unp": row.unp} for row in rows[:50]],
             "truncated": len(rows) > 50}
+
+
+@router.get("/organizations/{org_id}/suppliers/{supplier_id}/scorecard")
+async def supplier_scorecard(org_id: int, supplier_id: int, ctx=Depends(current_read_scope)):
+    """Company-only operational evidence; claims lack a stable legal-entity owner."""
+    session, _ = ctx
+    supplier = await session.get(Supplier, supplier_id)
+    if supplier is None:
+        raise HTTPException(404, "Supplier not found")
+    orders = (await session.scalars(select(PurchaseOrder).join(PurchaseOwnership,
+        (PurchaseOwnership.kind == "order") & (PurchaseOwnership.source_id == PurchaseOrder.id))
+        .where(PurchaseOwnership.organization_id == org_id,
+               PurchaseOrder.supplier_id == supplier_id).order_by(PurchaseOrder.id))).all()
+    eligible = [row for row in orders if row.status == RECEIVED_ORDER_STATUS
+                and row.received_at is not None and row.eta_date is not None]
+    on_time = sum(row.received_at.date() <= row.eta_date for row in eligible)
+    prices = (await session.scalars(select(RfqBid.price_byn).join(Rfq, Rfq.id == RfqBid.rfq_id)
+        .join(PurchaseOwnership, (PurchaseOwnership.kind == "request") &
+              (PurchaseOwnership.source_id == Rfq.request_id))
+        .where(PurchaseOwnership.organization_id == org_id, Rfq.request_key.is_not(None),
+               RfqBid.supplier_id == supplier_id, RfqBid.is_winner.is_(True)))).all()
+    average = ((sum(prices, Decimal("0")) / len(prices)).quantize(Decimal("0.01"),
+        rounding=ROUND_HALF_UP) if prices else None)
+    return {"organization_id": org_id, "supplier_id": supplier.id,
+            "supplier_name": supplier.name, "orders_count": len(orders),
+            "on_time_observed_count": len(eligible), "on_time_count": on_time,
+            "on_time_rate": on_time / len(eligible) if eligible else None,
+            "won_rfq_count": len(prices),
+            "avg_won_price_byn": str(average) if average is not None else None,
+            "claims_total": None, "claims_open": None, "claims_closed": None,
+            "score": None, "status": "provisional_claims_unattributed",
+            "reason": "Supplier claims have no confirmed organization owner; quality and total score are unavailable"}
 
 
 @router.get("/organizations/{org_id}/open-orders")

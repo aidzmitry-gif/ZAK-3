@@ -907,50 +907,7 @@ async def update_supplier(
 
 @router.get("/suppliers/{supplier_id}/scorecard")
 async def supplier_scorecard(supplier_id: int, session: AsyncSession = Depends(get_session)):
-    """Скоркарта поставщика: заказы, претензии (откр/закр), средняя выигранная цена RFQ,
-    компоненты и итоговый балл 0–10. Своевременность — доля заказов, принятых не позже ETA
-    (received_at vs eta_date); None, если нет заказов с обоими полями (honest-empty)."""
-    obj = await session.get(Supplier, supplier_id)
-    if obj is None:
-        raise HTTPException(status_code=404, detail="Поставщик не найден")
-    orders_count = int(
-        (await session.execute(
-            select(func.count()).where(PurchaseOrder.supplier_id == supplier_id)
-        )).scalar_one()
-    )
-    claims = (
-        await session.execute(
-            select(SupplierClaim.status, func.count())
-            .where(SupplierClaim.supplier_id == supplier_id)
-            .group_by(SupplierClaim.status)
-        )
-    ).all()
-    claims_by_status = {s: int(c) for s, c in claims}
-    claims_total = sum(claims_by_status.values())
-    claims_open = claims_total - sum(claims_by_status.get(s, 0) for s in CLAIM_CLOSED_STATUSES)
-    # качество: отклонённые претензии (поставщик не виноват) НЕ снижают балл
-    claims_for_quality = claims_total - claims_by_status.get("rejected", 0)
-    avg_price = (
-        await session.execute(
-            select(func.avg(RfqBid.price_byn)).where(
-                RfqBid.supplier_id == supplier_id, RfqBid.is_winner.is_(True)
-            )
-        )
-    ).scalar_one_or_none()
-    # своевременность: ETA vs факт приёмки (received_at) по принятым заказам поставщика
-    on_time_rate = (await _on_time_rates(session, {supplier_id})).get(supplier_id)
-    scoring = _score_components(orders_count, claims_for_quality, on_time_rate)
-    return {
-        "supplier_id": supplier_id,
-        "orders_count": orders_count,
-        "claims_open": claims_open,
-        "claims_closed": claims_total - claims_open,
-        "claims_total": claims_total,
-        "on_time_rate": on_time_rate,  # None — нет заказов с ETA+фактом (honest-empty)
-        "avg_won_price_byn": float(avg_price) if avg_price is not None else None,
-        "components": scoring["components"],
-        "score": scoring["score"],
-    }
+    raise HTTPException(410, "Select an organization and use its supplier scorecard")
 
 
 # ───────────────────────── RFQ / тендер закупки ─────────────────────────
