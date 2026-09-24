@@ -270,7 +270,7 @@ async def edit_document(org_id: int, receipt_id: int, data: ReceiptEdit, ctx=Dep
 
 async def validate_supplier(session, document):
     if document.supplier_id is None:
-        return  # Historical string-only drafts remain replayable; the editor requires a selected supplier.
+        raise HTTPException(422, "Select supplier from procurement catalogue")
     from modules.procurement.models import Supplier
 
     supplier = await session.scalar(select(Supplier).where(
