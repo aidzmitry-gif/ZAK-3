@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 from sqlalchemy import (
     JSON,
     DateTime,
@@ -67,11 +67,19 @@ class ReceiptContent(Input):
     invoice_reference: str = Field(min_length=1, max_length=200)
     document_date: date
     operation_date: date
-    supplier: str = Field(min_length=1, max_length=200)
+    supplier: str = Field(min_length=1, max_length=255)
+    supplier_id: int | None = Field(default=None, gt=0, strict=True)
+    supplier_unp: str | None = Field(default=None, max_length=32, strict=True)
     contract: str = Field(min_length=1, max_length=200)
     warehouse: str = Field(min_length=1, max_length=200)
     explanation: str = Field(min_length=1, max_length=700)
     items: list[ReceiptItem] = Field(min_length=1, max_length=300)
+
+    @model_validator(mode="after")
+    def selected_supplier_pair(self):
+        if (self.supplier_id is None) != (self.supplier_unp is None):
+            raise ValueError("Supplier ID and UNP snapshot must be selected together")
+        return self
 
 
 class ReceiptCreate(Input):
@@ -228,6 +236,7 @@ async def create_document(org_id: int, data: ReceiptCreate, ctx=Depends(scoped),
         if ReceiptContent.model_validate(first.document).model_dump(mode="json") != payload:
             raise HTTPException(409, "Source key already identifies a different receipt")
         return await output(session, existing)
+    await validate_supplier(session, data.document)
     await validate_orders(session, org_id, data.document)
     row = ReceiptDocument(organization_id=org_id, source_key=data.key, current_version=1,
                           status="draft", created_by=actor)
@@ -249,6 +258,7 @@ async def edit_document(org_id: int, receipt_id: int, data: ReceiptEdit, ctx=Dep
         raise HTTPException(404, "Receipt not found")
     if row.status != "draft" or row.current_version != data.expected_version or await session.get(ReceiptPosting, row.id):
         raise HTTPException(409, "Receipt is not an editable draft at the expected version")
+    await validate_supplier(session, data.document)
     await validate_orders(session, org_id, data.document)
     row.current_version += 1
     session.add(ReceiptRevision(receipt_id=row.id, version=row.current_version,
@@ -256,6 +266,19 @@ async def edit_document(org_id: int, receipt_id: int, data: ReceiptEdit, ctx=Dep
     await access[1].source_changed(session, org_id, access[2], f"procurement:receipt:{row.id}", row.current_version, data.document.operation_date.isoformat())
     await session.flush()
     return await output(session, row)
+
+
+async def validate_supplier(session, document):
+    if document.supplier_id is None:
+        return  # Historical string-only drafts remain replayable; the editor requires a selected supplier.
+    from modules.procurement.models import Supplier
+
+    supplier = await session.scalar(select(Supplier).where(
+        Supplier.id == document.supplier_id).with_for_update(read=True)
+        .execution_options(populate_existing=True))
+    if (supplier is None or supplier.status != "active" or supplier.name != document.supplier
+            or supplier.unp != document.supplier_unp):
+        raise HTTPException(409, "Supplier catalogue changed; select the active supplier again")
 
 
 async def validate_orders(session, org_id, document):
@@ -301,7 +324,7 @@ async def prepare_receipt(session, org_id, receipt_id, data):
     facts = revision.document
     if len(data.inventory_accounts) != len(facts["items"]):
         raise HTTPException(422, "Select an inventory account for every source line")
-    return {**{k: v for k, v in facts.items() if k not in {"currency", "supplier", "items"}},
+    return {**{k: v for k, v in facts.items() if k not in {"currency", "supplier", "supplier_id", "supplier_unp", "items"}},
             "source": f"procurement:receipt:{row.id}", "source_version": row.current_version,
             "counterparty": facts["supplier"], "posting_date": data.posting_date.isoformat(),
             "policy_id": data.policy_id, "settlement_account": data.settlement_account,
