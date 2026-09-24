@@ -63,6 +63,8 @@ class ProcurementSourceService:
         from modules.procurement.receipt_documents import ReceiptContent
 
         document = ReceiptContent.model_validate(source["document"])
+        if source["status"] == "draft" and document.supplier_id is None:
+            raise ValueError("Match the draft supplier to the catalogue before warehouse receipt")
         lines = []
         for position, item in enumerate(document.items, start=1):
             if item.unit is None:

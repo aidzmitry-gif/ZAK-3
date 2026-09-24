@@ -322,6 +322,8 @@ async def prepare_receipt(session, org_id, receipt_id, data):
     if revision is None:
         raise HTTPException(409, "Receipt source revision is missing")
     facts = revision.document
+    if row.status == "draft" and facts.get("supplier_id") is None:
+        raise HTTPException(409, "Match the draft supplier to the catalogue before posting")
     if len(data.inventory_accounts) != len(facts["items"]):
         raise HTTPException(422, "Select an inventory account for every source line")
     return {**{k: v for k, v in facts.items() if k not in {"currency", "supplier", "supplier_id", "supplier_unp", "items"}},
