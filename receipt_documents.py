@@ -7,15 +7,6 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Annotated, Literal
 
-from config.access import is_package_allowed
-from core.db.base import Base
-from core.domain.models import Sku
-from core.runtime.deps import get_core, get_session
-from core.services.auth import get_current_user
-from core.services.procurement import (
-    ReceiptAccountingConfirmation,
-    ReceiptAccountingOptions,
-)
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 from sqlalchemy import (
@@ -31,6 +22,16 @@ from sqlalchemy import (
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
+
+from config.access import is_package_allowed
+from core.db.base import Base
+from core.domain.models import Sku
+from core.runtime.deps import get_core, get_session
+from core.services.auth import get_current_user
+from core.services.procurement import (
+    ReceiptAccountingConfirmation,
+    ReceiptAccountingOptions,
+)
 
 
 def exact(value):
@@ -94,6 +95,7 @@ class ReceiptCreate(Input):
 
 
 class ReceiptEdit(Input):
+    key: str = Field(min_length=1, max_length=160)
     expected_version: int = Field(ge=1, strict=True)
     document: ReceiptContent
 
@@ -126,10 +128,15 @@ class ReceiptDocument(Base):
 
 class ReceiptRevision(Base):
     __tablename__ = "receipt_revision"
-    __table_args__ = (UniqueConstraint("receipt_id", "version"), {"schema": "procurement"})
+    __table_args__ = (
+        UniqueConstraint("receipt_id", "version"),
+        UniqueConstraint("receipt_id", "request_key", name="uq_receipt_revision_request"),
+        {"schema": "procurement"},
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     receipt_id: Mapped[int] = mapped_column(ForeignKey("procurement.receipt_document.id"))
     version: Mapped[int] = mapped_column(Integer)
+    request_key: Mapped[str | None] = mapped_column(String(160))
     document: Mapped[dict] = mapped_column(JSON)
     actor: Mapped[str] = mapped_column(String(200))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -199,7 +206,7 @@ async def output(session, row):
     return {"id": row.id, "organization_id": row.organization_id, "key": row.source_key,
             "status": "posted" if posted else row.status, "version": row.current_version,
             "posting": {"entry_id": posted.entry_id, "version": posted.version} if posted else None,
-            "revisions": [{"version": r.version, "document": r.document,
+            "revisions": [{"version": r.version, "request_key": r.request_key, "document": r.document,
                            "actor": r.actor, "created_at": r.created_at} for r in revisions]}
 
 
@@ -269,6 +276,17 @@ async def edit_document(org_id: int, receipt_id: int, data: ReceiptEdit, ctx=Dep
     ).with_for_update())
     if row is None:
         raise HTTPException(404, "Receipt not found")
+    payload = data.document.model_dump(mode="json")
+    repeated = await session.scalar(select(ReceiptRevision).where(
+        ReceiptRevision.receipt_id == row.id, ReceiptRevision.request_key == data.key,
+    ))
+    if repeated is not None:
+        if (repeated.version != data.expected_version + 1 or repeated.actor != actor
+                or repeated.document != payload):
+            raise HTTPException(409, "Edit key already identifies a different receipt revision")
+        if row.current_version != repeated.version:
+            raise HTTPException(409, "Receipt changed after the repeated edit; reopen the current version")
+        return await output(session, row)
     if row.status != "draft" or row.current_version != data.expected_version or await session.get(ReceiptPosting, row.id):
         raise HTTPException(409, "Receipt is not an editable draft at the expected version")
     await validate_supplier(session, data.document)
@@ -276,7 +294,7 @@ async def edit_document(org_id: int, receipt_id: int, data: ReceiptEdit, ctx=Dep
     await validate_orders(session, org_id, data.document)
     row.current_version += 1
     session.add(ReceiptRevision(receipt_id=row.id, version=row.current_version,
-                                document=data.document.model_dump(mode="json"), actor=actor))
+                                request_key=data.key, document=payload, actor=actor))
     await access[1].source_changed(session, org_id, access[2], f"procurement:receipt:{row.id}", row.current_version, data.document.operation_date.isoformat())
     await session.flush()
     return await output(session, row)
