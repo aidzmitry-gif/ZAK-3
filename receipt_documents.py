@@ -2,11 +2,20 @@
 
 No accounting or warehouse movements are created by saving a draft.
 """
-from datetime import date, datetime
 from dataclasses import dataclass
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Annotated, Literal
 
+from config.access import is_package_allowed
+from core.db.base import Base
+from core.domain.models import Sku
+from core.runtime.deps import get_core, get_session
+from core.services.auth import get_current_user
+from core.services.procurement import (
+    ReceiptAccountingConfirmation,
+    ReceiptAccountingOptions,
+)
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 from sqlalchemy import (
@@ -22,12 +31,6 @@ from sqlalchemy import (
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
-
-from config.access import is_package_allowed
-from core.db.base import Base
-from core.runtime.deps import get_core, get_session
-from core.services.auth import get_current_user
-from core.services.procurement import ReceiptAccountingConfirmation, ReceiptAccountingOptions
 
 
 def exact(value):
@@ -53,6 +56,8 @@ class Input(BaseModel):
 class ReceiptItem(Input):
     order_id: int | None = Field(default=None, gt=0, strict=True)
     order_line_id: int | None = Field(default=None, gt=0, strict=True, exclude_if=lambda value: value is None)
+    sku_id: int | None = Field(default=None, gt=0, strict=True)
+    sku_title: str | None = Field(default=None, min_length=1, max_length=255, strict=True)
     sku: str = Field(min_length=1, max_length=200)
     unit: str | None = Field(default=None, min_length=1, max_length=32)
     lot: str = Field(min_length=1, max_length=200)
@@ -244,6 +249,7 @@ async def create_document(org_id: int, data: ReceiptCreate, ctx=Depends(scoped),
             raise HTTPException(409, "Source key already identifies a different receipt")
         return await output(session, existing)
     await validate_supplier(session, data.document)
+    await validate_skus(session, data.document)
     await validate_orders(session, org_id, data.document)
     row = ReceiptDocument(organization_id=org_id, source_key=data.key, current_version=1,
                           status="draft", created_by=actor)
@@ -266,6 +272,7 @@ async def edit_document(org_id: int, receipt_id: int, data: ReceiptEdit, ctx=Dep
     if row.status != "draft" or row.current_version != data.expected_version or await session.get(ReceiptPosting, row.id):
         raise HTTPException(409, "Receipt is not an editable draft at the expected version")
     await validate_supplier(session, data.document)
+    await validate_skus(session, data.document)
     await validate_orders(session, org_id, data.document)
     row.current_version += 1
     session.add(ReceiptRevision(receipt_id=row.id, version=row.current_version,
@@ -284,6 +291,18 @@ async def validate_supplier(session, document):
     if supplier is None:
         raise HTTPException(409, "Supplier or MDM identity changed; select the active supplier again")
     return supplier
+
+
+async def validate_skus(session, document):
+    if any(item.sku_id is None or item.sku_title is None or item.unit is None for item in document.items):
+        raise HTTPException(422, "Select every receipt item from the active SKU catalogue")
+    ids = {item.sku_id for item in document.items}
+    rows = (await session.scalars(select(Sku).where(Sku.id.in_(ids)).with_for_update(read=True))).all()
+    skus = {row.id: row for row in rows}
+    if any((sku := skus.get(item.sku_id)) is None or not sku.is_active
+           or sku.code != item.sku or sku.title != item.sku_title or sku.unit != item.unit
+           for item in document.items):
+        raise HTTPException(409, "SKU catalogue changed; select the active item again")
 
 
 async def validate_orders(session, org_id, document):
@@ -341,6 +360,8 @@ async def prepare_receipt(session, org_id, receipt_id, data, *, require_current_
     facts = revision.document
     if row.status == "draft" and facts.get("supplier_id") is None:
         raise HTTPException(409, "Match the draft supplier to the catalogue before posting")
+    if row.status == "draft" and any(item.get("sku_id") is None for item in facts["items"]):
+        raise HTTPException(409, "Match every draft receipt item to the SKU catalogue before posting")
     verified_counterparty_id = frozen_counterparty_id
     if require_current_supplier:
         supplier = await validate_supplier(session, ReceiptContent.model_validate(facts))
@@ -352,7 +373,7 @@ async def prepare_receipt(session, org_id, receipt_id, data, *, require_current_
             "counterparty": facts["supplier"], "posting_date": data.posting_date.isoformat(),
             "policy_id": data.policy_id, "settlement_account": data.settlement_account,
             "vat_account": data.vat_account,
-            "items": [{**{k: v for k, v in item.items() if k != "order_line_id"}, "account": account} for item, account in zip(facts["items"], data.inventory_accounts, strict=True)]}
+            "items": [{**{k: v for k, v in item.items() if k not in {"order_line_id", "sku_id", "sku_title"}}, "account": account} for item, account in zip(facts["items"], data.inventory_accounts, strict=True)]}
     return PreparedReceipt(document, verified_counterparty_id)
 
 

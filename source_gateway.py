@@ -69,6 +69,8 @@ class ProcurementSourceService:
         document = ReceiptContent.model_validate(source["document"])
         if source["status"] == "draft" and document.supplier_id is None:
             raise ValueError("Match the draft supplier to the catalogue before warehouse receipt")
+        if source["status"] == "draft" and any(item.sku_id is None for item in document.items):
+            raise ValueError("Match every draft receipt item to the SKU catalogue before warehouse receipt")
         lines = []
         for position, item in enumerate(document.items, start=1):
             if item.unit is None:
