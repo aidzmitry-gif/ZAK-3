@@ -8,6 +8,7 @@ from modules.procurement.receipt_documents import (
     ReceiptPosting,
     ReceiptRevision,
     prepare_receipt,
+    saved_posting_options,
 )
 
 
@@ -41,11 +42,14 @@ class ProcurementSourceService:
         if source is None or source["status"] != "posted" or type(expected_version) is not int or source["version"] != expected_version:
             raise ValueError("Exact posted receipt source is required")
         posting = await session.get(ReceiptPosting, receipt_id)
-        options = ReceiptAccountingOptions.model_validate(posting.options)
+        saved_options, frozen_identity = saved_posting_options(posting)
+        options = ReceiptAccountingOptions.model_validate(saved_options)
         if options.expected_version != expected_version:
             raise ValueError("Posted receipt options do not match its source version")
-        prepared = await prepare_receipt(session, organization_id, receipt_id, options)
-        return {"document": prepared, "entry_id": posting.entry_id, "digest": posting.digest, "actor": posting.actor}
+        prepared = await prepare_receipt(session, organization_id, receipt_id, options,
+                                         frozen_counterparty_id=frozen_identity)
+        return {"document": prepared.document, "entry_id": posting.entry_id,
+                "digest": posting.digest, "actor": posting.actor}
 
     async def warehouse_receipt_source(self, session, organization_id, receipt_id, expected_version):
         if type(expected_version) is not int or expected_version < 1:
@@ -85,8 +89,10 @@ class ProcurementSourceService:
 
         return await confirm_receipt(session, organization_id, receipt_id, command, user, accounting, event_bus)
 
-    async def prepare_receipt(self, session, organization_id, receipt_id, options):
-        return await prepare_receipt(session, organization_id, receipt_id, options)
+    async def prepare_receipt(self, session, organization_id, receipt_id, options, *,
+                              require_current_supplier=False):
+        return await prepare_receipt(session, organization_id, receipt_id, options,
+                                     require_current_supplier=require_current_supplier)
 
     async def receipt_source(self, session, organization_id, receipt_id):
         row = await session.scalar(select(ReceiptDocument).where(

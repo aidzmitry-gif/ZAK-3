@@ -3,6 +3,7 @@
 No accounting or warehouse movements are created by saving a draft.
 """
 from datetime import date, datetime
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Annotated, Literal
 
@@ -98,6 +99,12 @@ class ReceiptAccounts(ReceiptAccountingOptions):
 
 class ReceiptConfirm(ReceiptAccountingConfirmation):
     """Compatibility name for the shared confirmation contract."""
+
+
+@dataclass(frozen=True)
+class PreparedReceipt:
+    document: dict
+    verified_counterparty_id: int | None
 
 
 class ReceiptDocument(Base):
@@ -273,8 +280,10 @@ async def validate_supplier(session, document):
         raise HTTPException(422, "Select supplier from procurement catalogue")
     from modules.procurement.supplier_identity import selected_supplier
 
-    if await selected_supplier(session, document.supplier_id, document.supplier, document.supplier_unp) is None:
+    supplier = await selected_supplier(session, document.supplier_id, document.supplier, document.supplier_unp)
+    if supplier is None:
         raise HTTPException(409, "Supplier or MDM identity changed; select the active supplier again")
+    return supplier
 
 
 async def validate_orders(session, org_id, document):
@@ -304,7 +313,19 @@ async def validate_orders(session, org_id, document):
                 raise HTTPException(409, "Receipt order line must match the exact order and SKU")
 
 
-async def prepare_receipt(session, org_id, receipt_id, data, *, require_current_supplier=False):
+def saved_posting_options(posting):
+    if not isinstance(posting.options, dict):
+        raise ValueError("Stored receipt posting options are invalid")
+    options = dict(posting.options)
+    marker = object()
+    identity = options.pop("supplier_counterparty_id", marker)
+    if identity is not marker and (type(identity) is not int or identity <= 0):
+        raise ValueError("Stored receipt counterparty identity is invalid")
+    return options, None if identity is marker else identity
+
+
+async def prepare_receipt(session, org_id, receipt_id, data, *, require_current_supplier=False,
+                          frozen_counterparty_id=None):
     row = await session.scalar(select(ReceiptDocument).where(
         ReceiptDocument.id == receipt_id, ReceiptDocument.organization_id == org_id,
     ).with_for_update())
@@ -320,24 +341,28 @@ async def prepare_receipt(session, org_id, receipt_id, data, *, require_current_
     facts = revision.document
     if row.status == "draft" and facts.get("supplier_id") is None:
         raise HTTPException(409, "Match the draft supplier to the catalogue before posting")
+    verified_counterparty_id = frozen_counterparty_id
     if require_current_supplier:
-        await validate_supplier(session, ReceiptContent.model_validate(facts))
+        supplier = await validate_supplier(session, ReceiptContent.model_validate(facts))
+        verified_counterparty_id = supplier.counterparty_id
     if len(data.inventory_accounts) != len(facts["items"]):
         raise HTTPException(422, "Select an inventory account for every source line")
-    return {**{k: v for k, v in facts.items() if k not in {"currency", "supplier", "supplier_id", "supplier_unp", "items"}},
+    document = {**{k: v for k, v in facts.items() if k not in {"currency", "supplier", "supplier_id", "supplier_unp", "items"}},
             "source": f"procurement:receipt:{row.id}", "source_version": row.current_version,
             "counterparty": facts["supplier"], "posting_date": data.posting_date.isoformat(),
             "policy_id": data.policy_id, "settlement_account": data.settlement_account,
             "vat_account": data.vat_account,
             "items": [{**{k: v for k, v in item.items() if k != "order_line_id"}, "account": account} for item, account in zip(facts["items"], data.inventory_accounts, strict=True)]}
+    return PreparedReceipt(document, verified_counterparty_id)
 
 
 @router.post("/organizations/{org_id}/receipt-documents/{receipt_id}/preview")
 async def preview_document(org_id: int, receipt_id: int, data: ReceiptAccounts, ctx=Depends(context)):
     session, gateway, user = ctx
     await gateway.source_member(session, org_id, user)
-    document = await prepare_receipt(session, org_id, receipt_id, data, require_current_supplier=True)
-    return await gateway.receipt_posting(session, org_id, user, document, confirm_digest=None)
+    prepared = await prepare_receipt(session, org_id, receipt_id, data, require_current_supplier=True)
+    return await gateway.receipt_posting(session, org_id, user, prepared.document, confirm_digest=None,
+                                         verified_counterparty_id=prepared.verified_counterparty_id)
 
 
 @router.post("/organizations/{org_id}/receipt-documents/{receipt_id}/confirm", status_code=201)
@@ -350,14 +375,23 @@ async def confirm_receipt(session, org_id, receipt_id, data, user, gateway, even
     """Canonical atomic command shared by procurement and accounting entry points."""
     actor = await gateway.source_member(session, org_id, user)
     previous = await session.get(ReceiptPosting, receipt_id)
-    document = await prepare_receipt(session, org_id, receipt_id, data,
-                                     require_current_supplier=previous is None)
     options = data.model_dump(mode="json", exclude={"digest"})
-    if previous and (previous.options != options or previous.digest != data.digest):
-        raise HTTPException(409, "Receipt already posted with different accounting settings")
-    result = await gateway.receipt_posting(session, org_id, user, document,
-                                           confirm_digest=data.digest, event_bus=event_bus)
+    frozen_identity = None
+    if previous:
+        try:
+            saved_options, frozen_identity = saved_posting_options(previous)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if saved_options != options or previous.digest != data.digest:
+            raise HTTPException(409, "Receipt already posted with different accounting settings")
+    prepared = await prepare_receipt(session, org_id, receipt_id, data,
+                                     require_current_supplier=previous is None,
+                                     frozen_counterparty_id=frozen_identity)
+    result = await gateway.receipt_posting(session, org_id, user, prepared.document,
+                                           confirm_digest=data.digest, event_bus=event_bus,
+                                           verified_counterparty_id=prepared.verified_counterparty_id)
     if not previous:
+        options["supplier_counterparty_id"] = prepared.verified_counterparty_id
         session.add(ReceiptPosting(receipt_id=receipt_id, version=data.expected_version,
                                    entry_id=result["entry_id"], options=options,
                                    digest=data.digest, actor=actor))
