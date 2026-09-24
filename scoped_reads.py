@@ -12,6 +12,7 @@ from modules.procurement.models import (
     PurchaseOrder,
     PurchaseOrderLine,
     PurchaseRequest,
+    Supplier,
 )
 from modules.procurement.ownership import (
     OrderRequestLink,
@@ -39,6 +40,21 @@ async def sku_options(org_id: int, q: str = Query("", max_length=100),
     return {"organization_id": org_id,
             "items": [{"id": row.id, "code": row.code, "title": row.title,
                        "unit": row.unit} for row in rows[:50]],
+            "truncated": len(rows) > 50}
+
+
+@router.get("/organizations/{org_id}/supplier-options")
+async def supplier_options(org_id: int, q: str = Query("", max_length=100),
+                           ctx=Depends(current_read_scope)):
+    session, _ = ctx
+    statement = select(Supplier).where(Supplier.status == "active")
+    if q.strip():
+        term = q.strip()
+        statement = statement.where(or_(Supplier.name.icontains(term, autoescape=True),
+                                        Supplier.unp.icontains(term, autoescape=True)))
+    rows = (await session.scalars(statement.order_by(Supplier.name, Supplier.id).limit(51))).all()
+    return {"organization_id": org_id,
+            "items": [{"id": row.id, "name": row.name, "unp": row.unp} for row in rows[:50]],
             "truncated": len(rows) > 50}
 
 
