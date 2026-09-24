@@ -88,7 +88,7 @@ class OrderDocument(CanonicalInput):
     supplier: str = Field(strict=True, min_length=1, max_length=255)
     supplier_id: int | None = Field(default=None, strict=True, gt=0, le=2147483647)
     supplier_unp: str | None = Field(default=None, strict=True, max_length=32)
-    eta_date: str | None
+    eta_date: str | None = None
     freight_byn: str = Field(strict=True)
     lines: list[OrderLine] = Field(min_length=1, max_length=200)
 
@@ -251,7 +251,7 @@ async def validate_receipt(session, row):
     if await session.get(PurchaseOrder, row.order_id) is None:
         invalid()
     document = command["document"]
-    if owner.snapshot != {"number": result.get("number"), "supplier": document["supplier"], "supplier_id": document.get("supplier_id"), "status": "draft", "eta_date": document["eta_date"]}:
+    if owner.snapshot != {"number": result.get("number"), "supplier": document["supplier"], "supplier_id": document.get("supplier_id"), "status": "draft", "eta_date": document.get("eta_date")}:
         invalid()
     lines = result.get("lines")
     if not isinstance(lines, list) or len(lines) != len(document["lines"]):
@@ -282,7 +282,7 @@ async def validate_receipt(session, row):
                 or request_snapshot.get("stage") != "approval" or request_command_hash(request_snapshot) != basis["expected_hash"]):
             invalid()
     expected = {**common, "order_id": row.order_id, "ownership_id": row.ownership_id, "number": owner.snapshot["number"],
-        "status": "draft", "supplier": document["supplier"], "eta_date": document["eta_date"], "freight_byn": document["freight_byn"],
+        "status": "draft", "supplier": document["supplier"], "eta_date": document.get("eta_date"), "freight_byn": document["freight_byn"],
         "lines": lines, "request_id": row.request_id, "request_ownership_id": row.request_ownership_id,
         "link_id": row.link_id, "request_snapshot": request_snapshot}
     if result != expected:

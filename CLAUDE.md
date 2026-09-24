@@ -48,9 +48,9 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
   payload: `{order_id, number, from, to, supplier_id}`.
 - **Публикует** (emit): `procurement.rfq.awarded` — при выборе победителя тендера.
   payload: `{rfq_id, supplier_id, price_byn (str), sku_code, entity_ref:"rfq:<id>"}`.
-- **Публикует** (emit): `procurement.po.drafted` — при `award` тендера (выигранный RFQ → черновик PO).
-  payload: `{po_ref, supplier_id, planned_amount (str BYN), currency:"BYN", eta_date (str|None),
-  deal_id:null}`. Апстрим прогноза кэша для finance FIN-B1 (планируемый отток).
+- Выбор победителя общего RFQ не публикует `procurement.po.drafted`: без юрлица и подтверждённого
+  поставщика заказ и платёжный прогноз создавать нельзя. Подписчик finance остаётся для будущего
+  подтверждённого заказа с организационной принадлежностью.
 - **Публикует** (emit): `procurement.claim.resolved` — при закрытии претензии (resolved/rejected).
   payload: `{claim_id, supplier_id, claim_type, amount_byn (str|None), resolution, status,
   order_id (int|None), entity_ref:"claim:<id>"}`. Для finance/качества. `order_id` — резолв
@@ -130,7 +130,7 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
   `created_at`. Индекс `ix_rfq_bid_rfq (rfq_id)`.
 - **`purchase_request`** также получил `supplier_id` (int|None, soft-ref, приоритетный над строкой `supplier`).
 
-Новые заказы через `/organizations/{org_id}/orders` требуют выбранный `Supplier.id`, связанный с действующим MDM-контрагентом; имя и УНП сверяются с текущим эталоном. Текстовые исторические команды по прежнему ключу читаются и повторяются без изменения снимка. Черновики поступлений проверяют ту же связь перед первым проведением. Общие маршруты `/orders` и `/rfq/{id}/award` остаются устаревшими: они пока не обеспечивают этот организационный контракт и не должны использоваться как бухгалтерские источники.
+Новые заказы через `/organizations/{org_id}/orders` требуют выбранный `Supplier.id`, связанный с действующим MDM-контрагентом; имя и УНП сверяются с текущим эталоном. Текстовые исторические команды по прежнему ключу читаются и повторяются без изменения снимка. Черновики поступлений проверяют ту же связь перед первым проведением. Общий `POST /orders` возвращает 410; выбор победителя общего RFQ больше не создаёт заказ или платёжный прогноз без юрлица.
 - **`transport_method`** (`TransportMethod`) — справочник способов перевозки = шаблон длительностей
   этапов: `id`, `code` (unique: container/truck/…), `name`, `durations` (JSON {stage: дни}), `active`,
   `created_at`. Дефолты (Контейнер 112 / Машина 83) сидятся лениво из `plan.DEFAULT_METHODS`; редактируется.
@@ -157,10 +157,10 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
   debug/manual вход поверх `_request_from_deficit`; штатный путь — подписка `wms.stock.low`).
   Идемпотентно по (origin='deficit', позиция).
 - `PATCH /procurement/requests/{req_id}` — сменить стадию; при `stage == "qc"` эмитит `procurement.received` (404 если не найдена).
-- `POST /procurement/orders` — создать заказ с позициями (201); номер `PO-2026-NNNN`, если не задан.
-- `GET /procurement/orders` — все заказы с позициями (новые первыми, `list[PurchaseOrderOut]`).
-- `GET /procurement/open-orders` — открытые заказы (статусы `ordered`/`shipped`/`customs`) с ETA и позициями, ближайший ETA первым — для расчёта «в пути» в sales.
-- `GET /procurement/orders/{order_id}` — один заказ с позициями (для редактора машины).
+- `POST /procurement/orders` — 410; новый заказ создаётся только через маршрут выбранного юрлица.
+- `GET /procurement/orders` — 410; список доступен только в контексте выбранного юрлица.
+- `GET /procurement/open-orders` — 410; открытые заказы доступны по выбранному юрлицу.
+- `GET /procurement/orders/{order_id}` — 410; карточка доступна по выбранному юрлицу.
 - `PATCH /procurement/orders/{order_id}` — сменить статус по машине состояний (422 на откат назад /
   недопустимый, 409 на отмену принятого); эмит `procurement.order.status_changed`; при **фактической**
   приёмке (`received`) фиксирует landed cost + эмитит `landed_cost.calculated` + `procurement.received` по позициям.
@@ -177,8 +177,8 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
 - `GET/POST /procurement/rfq`, `GET /procurement/rfq/{id}` — тендер (предложения сортированы по цене, `best_bid_id`).
 - `POST /procurement/rfq/{id}/bids` — предложение поставщика (409 если RFQ закрыт).
 - `POST /procurement/rfq/{id}/award` — выбрать победителя (`is_winner`, status=awarded, эмит `rfq.awarded`);
-  доп. создаёт черновик `PurchaseOrder(status='draft')` у победителя с позицией из RFQ + эмит
-  `procurement.po.drafted` (для finance FIN-B1); ответ несёт `created_order_id`. Повтор award → 409.
+  заказ не создаётся, `created_order_id=null`. Закупщик выбирает юрлицо и создаёт заказ через
+  `/organizations/{org_id}/orders` после сверки поставщика. Повтор award → 409.
 - `GET /procurement/claims` — претензии (`list[SupplierClaimOut]`, новые первыми).
 - `POST /procurement/claims` — ручное заведение претензии (source=manual).
 - `PATCH /procurement/claims/{claim_id}` — назначить поставщика / урегулировать; при resolved/rejected — эмит `claim.resolved` (404 если не найдена).

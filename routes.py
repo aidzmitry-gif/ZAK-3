@@ -53,7 +53,6 @@ from modules.procurement.schemas import (
     OrderMutationOut,
     OrderPlanIn,
     OrderPlanOut,
-    PurchaseOrderCreate,
     PurchaseOrderLineIn,
     PurchaseOrderLineOut,
     PurchaseOrderOut,
@@ -559,34 +558,10 @@ async def get_order(order_id: int, session: AsyncSession = Depends(get_session))
     raise HTTPException(410, "Select an organization and use its procurement endpoints")
 
 
-@router.post("/orders", response_model=PurchaseOrderOut, status_code=201)
-async def create_order(
-    payload: PurchaseOrderCreate,
-    core: Core = Depends(get_core),
-    session: AsyncSession = Depends(get_session),
-):
-    """Создать заказ поставщику с позициями. Номер генерируется, если не задан."""
-    if payload.status == "cancelled":
-        raise HTTPException(status_code=422, detail="Нельзя создать заказ сразу в статусе «отменён»")
-    if payload.status == RECEIVED_ORDER_STATUS:
-        raise HTTPException(422, "Создайте заказ и подтвердите юрлицо перед приёмкой")
-    order = PurchaseOrder(
-        supplier=payload.supplier,
-        supplier_id=payload.supplier_id,
-        number=payload.number,
-        status=payload.status,
-        eta_date=payload.eta_date,
-        freight_byn=Decimal(str(payload.freight_byn)),
-    )
-    session.add(order)
-    await session.flush()
-    if not order.number:
-        order.number = f"PO-2026-{order.id:04d}"
-    for ln in payload.lines:
-        session.add(_new_line(order.id, ln))
-    await session.commit()
-    await session.refresh(order)
-    return (await _orders_out(session, [order]))[0]
+@router.post("/orders")
+async def create_order():
+    """Unscoped creation cannot establish a legal-entity owner or MDM supplier."""
+    raise HTTPException(410, "Select an organization and use its catalog-bound order command")
 
 
 def _validate_transition(current: str, new: str) -> None:
@@ -1097,38 +1072,9 @@ async def award_rfq(
         },
     )
 
-    # P7: выигранный тендер → черновик PO у победителя (та же транзакция) + апстрим прогноза
-    # кэша для finance (procurement.po.drafted). PO остаётся draft (не «в пути») до размещения.
-    planned_amount = (Decimal(str(winner.price_byn)) * Decimal(str(rfq.qty))).quantize(Decimal("0.01"))
-    order = PurchaseOrder(supplier="", supplier_id=winner.supplier_id, status="draft")
-    session.add(order)
-    await session.flush()
-    if not order.number:
-        order.number = f"PO-2026-{order.id:04d}"
-    session.add(
-        PurchaseOrderLine(
-            order_id=order.id,
-            sku_code=rfq.sku_code,
-            qty=Decimal(str(rfq.qty)),
-            goods_value_byn=planned_amount,  # цена победителя × кол-во = плановая стоимость позиции
-        )
-    )
-    core.event_bus.emit(
-        session,
-        "procurement.po.drafted",
-        {
-            "po_ref": order.number,
-            "supplier_id": winner.supplier_id,
-            "planned_amount": str(planned_amount),
-            "currency": "BYN",
-            "eta_date": order.eta_date.isoformat() if order.eta_date else None,
-            "deal_id": None,  # PO обслуживает много сделок — привязки к сделке нет (см. фриз §2)
-        },
-    )
-
     await session.commit()
     await session.refresh(rfq)
-    return _rfq_out(rfq, await _bids_of(session, rfq_id), created_order_id=order.id)
+    return _rfq_out(rfq, await _bids_of(session, rfq_id))
 
 
 # ───────────────────────── Претензии поставщикам ─────────────────────────
