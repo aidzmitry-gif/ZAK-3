@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import (
@@ -30,7 +30,9 @@ from modules.procurement.models import PurchaseOrder, PurchaseOrderLine, Transpo
 from modules.procurement.order_creation import line_result
 from modules.procurement.ownership import (
     PurchaseOwnership,
+    current_read_scope,
     effective_plan_user,
+    owned_plan_source,
     plan_context,
     request_command_hash,
 )
@@ -238,6 +240,44 @@ def response(result):
 def check_target(command, order_id):
     if command.order_id != order_id:
         raise HTTPException(409, "Command target differs from path")
+
+
+def history_changes(row: PurchaseOrderEditCommand) -> list[dict]:
+    effect = row.result["effect"]
+    if row.action == "header":
+        return [{"field": field, "before": before, "after": effect["after"][field]}
+                for field, before in effect["before"].items()]
+    if row.action == "status":
+        return [{"field": "status", "before": effect["from"], "after": effect["to"]}]
+    if row.action in {"add_line", "delete_line"}:
+        line = effect["line"]
+        return [{"field": f"lines/{line['id']}",
+                 "before": line if row.action == "delete_line" else None,
+                 "after": line if row.action == "add_line" else None}]
+    return [{"field": "plan", "before": None, "before_unknown": True, "after": {
+        "transport_method_code": effect["transport_method_code"],
+        "target_arrival_date": effect["target_arrival_date"],
+    }}]
+
+
+@router.get("/organizations/{org_id}/orders/{order_id}/edit-history")
+async def edit_history(org_id: int, order_id: int, after_id: int = Query(0, ge=0),
+                       ctx=Depends(current_read_scope)):
+    session, _ = ctx
+    _, order = await owned_plan_source(session, org_id, "order", order_id)
+    rows = (await session.scalars(select(PurchaseOrderEditCommand).where(
+        PurchaseOrderEditCommand.organization_id == org_id,
+        PurchaseOrderEditCommand.target_order_id == order_id,
+        PurchaseOrderEditCommand.outcome == "applied",
+        PurchaseOrderEditCommand.id > after_id,
+    ).order_by(PurchaseOrderEditCommand.id).limit(51))).all()
+    page = rows[:50]
+    for row in page:
+        await validate_receipt(session, row)
+    return {"organization_id": org_id, "order_id": order_id, "number": order.number,
+            "items": [{"id": row.id, "changed_at": row.created_at, "changed_by": row.actor,
+                       "action": row.action, "changes": history_changes(row)} for row in page],
+            "next_after_id": page[-1].id if len(rows) > 50 else None}
 
 
 @router.post("/organizations/{org_id}/orders/{order_id}/edit-commands/reconcile")
