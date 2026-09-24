@@ -360,7 +360,10 @@ async def prepare_receipt(session, org_id, receipt_id, data, *, require_current_
     facts = revision.document
     if row.status == "draft" and facts.get("supplier_id") is None:
         raise HTTPException(409, "Match the draft supplier to the catalogue before posting")
-    if row.status == "draft" and any(item.get("sku_id") is None for item in facts["items"]):
+    if row.status == "draft" and any(
+        item.get("sku_id") is None or item.get("sku_title") is None or item.get("unit") is None
+        for item in facts["items"]
+    ):
         raise HTTPException(409, "Match every draft receipt item to the SKU catalogue before posting")
     verified_counterparty_id = frozen_counterparty_id
     if require_current_supplier:
