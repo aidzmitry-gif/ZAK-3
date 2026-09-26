@@ -117,18 +117,26 @@ async def write_scope(org_id: int, ctx=Depends(plan_context)):
 
 
 @router.get("/organizations/{org_id}/supplier-contracts")
-async def list_contracts(org_id: int, supplier_id: int = Query(gt=0), ctx=Depends(read_scope)):
+async def list_contracts(
+    org_id: int, supplier_id: int = Query(gt=0),
+    status: str = Query(default="active", pattern="^(active|revoked)$"),
+    ctx=Depends(read_scope),
+):
     session, _ = ctx
-    supplier = await session.scalar(active_bound_suppliers().where(Supplier.id == supplier_id))
+    supplier = await session.scalar((active_bound_suppliers() if status == "active" else select(Supplier))
+                                    .where(Supplier.id == supplier_id))
     if supplier is None:
-        raise HTTPException(409, "Select an active directory supplier")
-    rows = (await session.scalars(select(SupplierContract).where(
+        raise HTTPException(409, "Select a directory supplier")
+    query = select(SupplierContract).where(
         SupplierContract.organization_id == org_id,
         SupplierContract.supplier_id == supplier_id,
-        SupplierContract.is_active.is_(True),
-    ).order_by(SupplierContract.number, SupplierContract.id).limit(101))).all()
+        SupplierContract.is_active.is_(status == "active"),
+    )
+    query = (query.order_by(SupplierContract.number, SupplierContract.id) if status == "active"
+             else query.order_by(SupplierContract.deactivated_at.desc(), SupplierContract.id.desc()))
+    rows = (await session.scalars(query.limit(101))).all()
     return {"organization_id": org_id, "supplier_id": supplier_id,
-            "items": [output(row) for row in rows[:100]], "truncated": len(rows) > 100}
+            "status": status, "items": [output(row) for row in rows[:100]], "truncated": len(rows) > 100}
 
 
 @router.post("/organizations/{org_id}/supplier-contracts", status_code=201)
