@@ -20,7 +20,6 @@ from modules.procurement.receipt_documents import Input, exact, immutable
 from modules.procurement.routes import _bids_of, _rfq_out
 from modules.procurement.supplier_identity import active_bound_suppliers
 
-
 router = APIRouter(tags=["RFQ по юрлицу"])
 Quote = Annotated[Decimal, BeforeValidator(exact), Field(ge=0, max_digits=14, decimal_places=2)]
 
