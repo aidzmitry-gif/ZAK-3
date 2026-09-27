@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_serializer, model_validator
 from sqlalchemy import (
     JSON,
     CheckConstraint,
@@ -22,6 +22,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db.base import Base
+from core.domain.models import Sku
 from modules.procurement.models import PurchaseOrder, PurchaseOrderLine
 from modules.procurement.ownership import (
     OrderRequestLink,
@@ -57,6 +58,9 @@ def fixed_decimal(value, scale, positive=False):
 
 class OrderLine(CanonicalInput):
     sku_code: str = Field(strict=True, min_length=1, max_length=64)
+    sku_id: int | None = Field(default=None, strict=True, gt=0, le=2147483647)
+    sku_title: str | None = Field(default=None, strict=True, min_length=1, max_length=255)
+    sku_unit: str | None = Field(default=None, strict=True, min_length=1, max_length=16)
     qty: str = Field(strict=True)
     goods_value_byn: str = Field(strict=True)
     weight: str = Field(strict=True)
@@ -67,10 +71,24 @@ class OrderLine(CanonicalInput):
     def exact(cls, value, info):
         return fixed_decimal(value, {"qty": 2, "goods_value_byn": 2, "weight": 3, "volume": 4}[info.field_name], info.field_name == "qty")
 
+    @model_validator(mode="after")
+    def paired_catalog_snapshot(self):
+        values = (self.sku_id, self.sku_title, self.sku_unit)
+        if any(value is not None for value in values) and not all(value is not None for value in values):
+            raise ValueError("SKU ID, title and unit must be supplied together")
+        return self
+
+    @model_serializer(mode="wrap")
+    def legacy_compatible_serialization(self, handler):
+        data = handler(self)
+        return {key: value for key, value in data.items() if value is not None}
+
 
 class OrderDocument(CanonicalInput):
     supplier: str = Field(strict=True, min_length=1, max_length=255)
-    eta_date: str | None
+    supplier_id: int | None = Field(default=None, strict=True, gt=0, le=2147483647)
+    supplier_unp: str | None = Field(default=None, strict=True, max_length=32)
+    eta_date: str | None = None
     freight_byn: str = Field(strict=True)
     lines: list[OrderLine] = Field(min_length=1, max_length=200)
 
@@ -90,7 +108,14 @@ class OrderDocument(CanonicalInput):
     def distinct_skus(self):
         if len({x.sku_code for x in self.lines}) != len(self.lines):
             raise ValueError("Duplicate SKU lines are not supported")
+        if (self.supplier_id is None) != (self.supplier_unp is None):
+            raise ValueError("Supplier ID and UNP snapshot must be supplied together")
         return self
+
+    @model_serializer(mode="wrap")
+    def legacy_compatible_serialization(self, handler):
+        data = handler(self)
+        return {key: value for key, value in data.items() if value is not None}
 
 
 class RequestBasis(CanonicalInput):
@@ -144,7 +169,7 @@ class PurchaseOrderCreation(Base):
 event.listen(PurchaseOrderCreation, "before_update", immutable)
 event.listen(PurchaseOrderCreation, "before_delete", immutable)
 router = APIRouter(tags=["Создание заказов поставщикам"])
-REJECTION_CODES = {"request_basis_changed", "request_basis_unavailable", "request_already_linked", "command_abandoned"}
+REJECTION_CODES = {"request_basis_changed", "request_basis_unavailable", "request_already_linked", "command_abandoned", "sku_catalog_changed", "supplier_catalog_changed"}
 
 
 def basis_snapshot(owner, row):
@@ -226,14 +251,15 @@ async def validate_receipt(session, row):
     if await session.get(PurchaseOrder, row.order_id) is None:
         invalid()
     document = command["document"]
-    if owner.snapshot != {"number": result.get("number"), "supplier": document["supplier"], "supplier_id": None, "status": "draft", "eta_date": document["eta_date"]}:
+    if owner.snapshot != {"number": result.get("number"), "supplier": document["supplier"], "supplier_id": document.get("supplier_id"), "status": "draft", "eta_date": document.get("eta_date")}:
         invalid()
     lines = result.get("lines")
     if not isinstance(lines, list) or len(lines) != len(document["lines"]):
         invalid()
     ids = []
     for line, original in zip(lines, document["lines"], strict=True):
-        if not isinstance(line, dict) or type(line.get("id")) is not int or line["id"] <= 0 or line != {"id": line["id"], **original}:
+        operational = {key: value for key, value in original.items() if key not in {"sku_id", "sku_title", "sku_unit"}}
+        if not isinstance(line, dict) or type(line.get("id")) is not int or line["id"] <= 0 or line != {"id": line["id"], **operational}:
             invalid()
         ids.append(line["id"])
     if len(set(ids)) != len(ids):
@@ -256,7 +282,7 @@ async def validate_receipt(session, row):
                 or request_snapshot.get("stage") != "approval" or request_command_hash(request_snapshot) != basis["expected_hash"]):
             invalid()
     expected = {**common, "order_id": row.order_id, "ownership_id": row.ownership_id, "number": owner.snapshot["number"],
-        "status": "draft", "supplier": document["supplier"], "eta_date": document["eta_date"], "freight_byn": document["freight_byn"],
+        "status": "draft", "supplier": document["supplier"], "eta_date": document.get("eta_date"), "freight_byn": document["freight_byn"],
         "lines": lines, "request_id": row.request_id, "request_ownership_id": row.request_ownership_id,
         "link_id": row.link_id, "request_snapshot": request_snapshot}
     if result != expected:
@@ -293,6 +319,8 @@ async def create_order(org_id: int, data: OrderCommand, ctx=Depends(plan_writer)
     existing = await saved_outcome(session, org_id, actor, data)
     if existing is not None:
         return response(existing)
+    if data.document.supplier_id is None:
+        raise HTTPException(422, "Select supplier from procurement catalogue")
     request_owner = request = snapshot = None
     if data.request_basis:
         basis = data.request_basis
@@ -308,7 +336,18 @@ async def create_order(org_id: int, data: OrderCommand, ctx=Depends(plan_writer)
         if await session.scalar(select(OrderRequestLink.id).where(OrderRequestLink.request_ownership_id == request_owner.id)):
             return response(await reject_command(session, org_id, actor, data, "request_already_linked"))
     doc = data.document
-    order = PurchaseOrder(supplier=doc.supplier, status="draft", eta_date=date.fromisoformat(doc.eta_date) if doc.eta_date else None,
+    from modules.procurement.supplier_identity import selected_supplier
+
+    if await selected_supplier(session, doc.supplier_id, doc.supplier, doc.supplier_unp) is None:
+        return response(await reject_command(session, org_id, actor, data, "supplier_catalog_changed"))
+    selected = [line for line in doc.lines if line.sku_id is not None]
+    if selected:
+        rows = (await session.scalars(select(Sku).where(Sku.id.in_([line.sku_id for line in selected])).with_for_update(read=True))).all()
+        skus = {row.id: row for row in rows}
+        if any((sku := skus.get(line.sku_id)) is None or not sku.is_active or sku.code != line.sku_code
+               or sku.title != line.sku_title or sku.unit != line.sku_unit for line in selected):
+            return response(await reject_command(session, org_id, actor, data, "sku_catalog_changed"))
+    order = PurchaseOrder(supplier=doc.supplier, supplier_id=doc.supplier_id, status="draft", eta_date=date.fromisoformat(doc.eta_date) if doc.eta_date else None,
                           freight_byn=Decimal(doc.freight_byn))
     session.add(order)
     await session.flush()

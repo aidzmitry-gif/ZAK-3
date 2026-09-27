@@ -1,6 +1,7 @@
 """Read-only primary document projection; procurement retains ownership."""
 from decimal import Decimal
 
+from fastapi import HTTPException
 from sqlalchemy import select
 
 from modules.procurement.receipt_documents import (
@@ -8,10 +9,14 @@ from modules.procurement.receipt_documents import (
     ReceiptPosting,
     ReceiptRevision,
     prepare_receipt,
+    saved_posting_options,
 )
 
 
 class ProcurementSourceService:
+    def __init__(self, services=None):
+        self.services = services
+
     async def additional_expense_source(self, session, organization_id, expense_id, expected_version):
         from modules.procurement.additional_expenses import (
             AdditionalExpenseContent,
@@ -41,11 +46,14 @@ class ProcurementSourceService:
         if source is None or source["status"] != "posted" or type(expected_version) is not int or source["version"] != expected_version:
             raise ValueError("Exact posted receipt source is required")
         posting = await session.get(ReceiptPosting, receipt_id)
-        options = ReceiptAccountingOptions.model_validate(posting.options)
+        saved_options, frozen_identity = saved_posting_options(posting)
+        options = ReceiptAccountingOptions.model_validate(saved_options)
         if options.expected_version != expected_version:
             raise ValueError("Posted receipt options do not match its source version")
-        prepared = await prepare_receipt(session, organization_id, receipt_id, options)
-        return {"document": prepared, "entry_id": posting.entry_id, "digest": posting.digest, "actor": posting.actor}
+        prepared = await prepare_receipt(session, organization_id, receipt_id, options,
+                                         frozen_counterparty_id=frozen_identity)
+        return {"document": prepared.document, "entry_id": posting.entry_id,
+                "digest": posting.digest, "actor": posting.actor}
 
     async def warehouse_receipt_source(self, session, organization_id, receipt_id, expected_version):
         if type(expected_version) is not int or expected_version < 1:
@@ -58,11 +66,33 @@ class ProcurementSourceService:
         source = await self.receipt_source(session, organization_id, receipt_id)
         if row.current_version != expected_version or source["version"] != expected_version:
             raise ValueError("Receipt version changed; review the current primary document")
+        if source["correction_of"] is not None:
+            raise ValueError("Correction drafts cannot be prepared as warehouse primary receipts")
         if source["status"] not in {"draft", "posted"}:
             raise ValueError("Receipt source is not available for physical receipt")
         from modules.procurement.receipt_documents import ReceiptContent
 
         document = ReceiptContent.model_validate(source["document"])
+        if source["status"] == "draft" and document.supplier_id is None:
+            raise ValueError("Match the draft supplier to the catalogue before warehouse receipt")
+        if source["status"] == "draft":
+            if document.warehouse_id is None or document.warehouse_title is None:
+                raise ValueError("Match the draft warehouse to the organization directory before warehouse receipt")
+            accounting = getattr(self.services, "accounting", None)
+            if accounting is None:
+                raise ValueError("Warehouse directory validation service is unavailable")
+            try:
+                await accounting.verify_warehouse_snapshot(session, organization_id, {
+                    "warehouse_id": document.warehouse_id,
+                    "warehouse": document.warehouse,
+                    "warehouse_title": document.warehouse_title,
+                })
+            except HTTPException as exc:
+                raise ValueError(str(exc.detail)) from exc
+        if source["status"] == "draft" and any(
+            item.sku_id is None or item.sku_title is None or item.unit is None for item in document.items
+        ):
+            raise ValueError("Match every draft receipt item to the SKU catalogue before warehouse receipt")
         lines = []
         for position, item in enumerate(document.items, start=1):
             if item.unit is None:
@@ -83,8 +113,10 @@ class ProcurementSourceService:
 
         return await confirm_receipt(session, organization_id, receipt_id, command, user, accounting, event_bus)
 
-    async def prepare_receipt(self, session, organization_id, receipt_id, options):
-        return await prepare_receipt(session, organization_id, receipt_id, options)
+    async def prepare_receipt(self, session, organization_id, receipt_id, options, *,
+                              require_current_supplier=False):
+        return await prepare_receipt(session, organization_id, receipt_id, options,
+                                     require_current_supplier=require_current_supplier)
 
     async def receipt_source(self, session, organization_id, receipt_id):
         row = await session.scalar(select(ReceiptDocument).where(
@@ -97,6 +129,11 @@ class ProcurementSourceService:
             raise ValueError("Receipt posting revision is inconsistent")
         if row.status == "posted" and posted is None:
             raise ValueError("Posted receipt has no posting record")
+        correction_of = None
+        if row.correction_of_receipt_id is not None:
+            correction_of = {"receipt_id": row.correction_of_receipt_id,
+                             "version": row.correction_of_version,
+                             "entry_id": row.correction_of_entry_id}
         version = posted.version if posted else row.current_version
         revision = await session.scalar(select(ReceiptRevision).where(
             ReceiptRevision.receipt_id == row.id, ReceiptRevision.version == version,
@@ -107,6 +144,7 @@ class ProcurementSourceService:
             "id": row.id, "organization_id": row.organization_id,
             "source": f"procurement:receipt:{row.id}", "version": version,
             "status": "posted" if posted else row.status,
+            "correction_of": correction_of,
             "entry_id": posted.entry_id if posted else None,
             "document": revision.document, "actor": revision.actor,
             "created_at": revision.created_at,

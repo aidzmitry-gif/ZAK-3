@@ -48,10 +48,11 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
   payload: `{order_id, number, from, to, supplier_id}`.
 - **Публикует** (emit): `procurement.rfq.awarded` — при выборе победителя тендера.
   payload: `{rfq_id, supplier_id, price_byn (str), sku_code, entity_ref:"rfq:<id>"}`.
-- **Публикует** (emit): `procurement.po.drafted` — при `award` тендера (выигранный RFQ → черновик PO).
-  payload: `{po_ref, supplier_id, planned_amount (str BYN), currency:"BYN", eta_date (str|None),
-  deal_id:null}`. Апстрим прогноза кэша для finance FIN-B1 (планируемый отток).
-- **Публикует** (emit): `procurement.claim.resolved` — при закрытии претензии (resolved/rejected).
+- Выбор победителя общего RFQ не публикует `procurement.po.drafted`: без юрлица и подтверждённого
+  поставщика заказ и платёжный прогноз создавать нельзя. Подписчик finance остаётся для будущего
+  подтверждённого заказа с организационной принадлежностью.
+- **Публикует** (emit): `procurement.claim.resolution_recorded` — подтверждённое решение
+  претензии указанного юрлица; событие не является подтверждением поступления денег.
   payload: `{claim_id, supplier_id, claim_type, amount_byn (str|None), resolution, status,
   order_id (int|None), entity_ref:"claim:<id>"}`. Для finance/качества. `order_id` — резолв
   `order_code`→`PurchaseOrder.number` (None, если претензия не привязана к заказу).
@@ -118,9 +119,11 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
     `amount_byn` (Numeric|None — заявленная сумма), `resolution` (str — как урегулировано),
     `status` (`open`→`resolved`/`rejected`), `source` (`production` авто / `manual` ручная),
     `entity_ref`, `created_at`.
-  - Создаётся авто (`on_production_scrap` при браке в ОТК) ИЛИ вручную (`POST /claims`).
+  - Создаётся авто (`on_production_scrap` при браке в ОТК) без юрлица либо вручную через
+    `/organizations/{org_id}/claims` с подтверждённым MDM-поставщиком и основанием владельца.
 - **`supplier`** (`Supplier`) — профиль поставщика закупок (НЕ дубль контрагента, эталон в MDM):
-  - `id` (PK), `name`, `unp` (soft-ref на MDM-контрагента, провенанс), `country`/`flag`,
+  - `id` (PK), `counterparty_id` (FK к MDM для новых профилей; старые без ID требуют сопоставления),
+    `name`/`unp` (снимок MDM), `country`/`flag`,
     `contact_person`/`phone`/`email`, `payment_terms`, `lead_time_days` (int|None), `incoterms`,
     `status` (active/blocked), `notes`, `created_at`.
 - **`rfq`** (`Rfq`) — запрос цен/тендер: `id`, `item`, `sku_code` (soft-ref), `qty`, `request_id`
@@ -129,6 +132,8 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
   `supplier_id` (soft-ref), `price_byn`, `lead_time_days`, `incoterms`, `note`, `is_winner` (bool),
   `created_at`. Индекс `ix_rfq_bid_rfq (rfq_id)`.
 - **`purchase_request`** также получил `supplier_id` (int|None, soft-ref, приоритетный над строкой `supplier`).
+
+Новые заказы через `/organizations/{org_id}/orders` требуют выбранный `Supplier.id`, связанный с действующим MDM-контрагентом; имя и УНП сверяются с текущим эталоном. Текстовые исторические команды по прежнему ключу читаются и повторяются без изменения снимка. Черновики поступлений проверяют ту же связь перед первым проведением. Общий `POST /orders` возвращает 410; выбор победителя общего RFQ больше не создаёт заказ или платёжный прогноз без юрлица.
 - **`transport_method`** (`TransportMethod`) — справочник способов перевозки = шаблон длительностей
   этапов: `id`, `code` (unique: container/truck/…), `name`, `durations` (JSON {stage: дни}), `active`,
   `created_at`. Дефолты (Контейнер 112 / Машина 83) сидятся лениво из `plan.DEFAULT_METHODS`; редактируется.
@@ -155,10 +160,10 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
   debug/manual вход поверх `_request_from_deficit`; штатный путь — подписка `wms.stock.low`).
   Идемпотентно по (origin='deficit', позиция).
 - `PATCH /procurement/requests/{req_id}` — сменить стадию; при `stage == "qc"` эмитит `procurement.received` (404 если не найдена).
-- `POST /procurement/orders` — создать заказ с позициями (201); номер `PO-2026-NNNN`, если не задан.
-- `GET /procurement/orders` — все заказы с позициями (новые первыми, `list[PurchaseOrderOut]`).
-- `GET /procurement/open-orders` — открытые заказы (статусы `ordered`/`shipped`/`customs`) с ETA и позициями, ближайший ETA первым — для расчёта «в пути» в sales.
-- `GET /procurement/orders/{order_id}` — один заказ с позициями (для редактора машины).
+- `POST /procurement/orders` — 410; новый заказ создаётся только через маршрут выбранного юрлица.
+- `GET /procurement/orders` — 410; список доступен только в контексте выбранного юрлица.
+- `GET /procurement/open-orders` — 410; открытые заказы доступны по выбранному юрлицу.
+- `GET /procurement/orders/{order_id}` — 410; карточка доступна по выбранному юрлицу.
 - `PATCH /procurement/orders/{order_id}` — сменить статус по машине состояний (422 на откат назад /
   недопустимый, 409 на отмену принятого); эмит `procurement.order.status_changed`; при **фактической**
   приёмке (`received`) фиксирует landed cost + эмитит `landed_cost.calculated` + `procurement.received` по позициям.
@@ -175,11 +180,12 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
 - `GET/POST /procurement/rfq`, `GET /procurement/rfq/{id}` — тендер (предложения сортированы по цене, `best_bid_id`).
 - `POST /procurement/rfq/{id}/bids` — предложение поставщика (409 если RFQ закрыт).
 - `POST /procurement/rfq/{id}/award` — выбрать победителя (`is_winner`, status=awarded, эмит `rfq.awarded`);
-  доп. создаёт черновик `PurchaseOrder(status='draft')` у победителя с позицией из RFQ + эмит
-  `procurement.po.drafted` (для finance FIN-B1); ответ несёт `created_order_id`. Повтор award → 409.
-- `GET /procurement/claims` — претензии (`list[SupplierClaimOut]`, новые первыми).
-- `POST /procurement/claims` — ручное заведение претензии (source=manual).
-- `PATCH /procurement/claims/{claim_id}` — назначить поставщика / урегулировать; при resolved/rejected — эмит `claim.resolved` (404 если не найдена).
+  заказ не создаётся, `created_order_id=null`. Закупщик выбирает юрлицо и создаёт заказ через
+  `/organizations/{org_id}/orders` после сверки поставщика. Повтор award → 409.
+- Общие `GET/POST /procurement/claims` и `PATCH /procurement/claims/{id}` возвращают 410.
+- `GET/POST /procurement/organizations/{org_id}/claims` — журнал и создание ручной претензии
+  с явным юрлицом; `POST .../{id}/resolve` сохраняет решение, `GET .../{id}/history` — аудит.
+  Автоматические претензии без владельца исключены из реестра до отдельной сверки.
 
 ## Межмодульные связи и зависимости
 - **procurement → wms:** событие `procurement.received` (приход на склад). Прямых вызовов других модулей нет.
@@ -195,8 +201,16 @@ sourcing-цикла. При переходе в стадию «Приёмка / 
   `flush` → присваивает авто-`number` (`ЗАК-2026-{id:04d}`) → второй commit. PATCH тоже коммитит сам.
 - `RECEIVED_STAGE = "qc"` (константа в `routes.py`): именно эта стадия = физический приём
   товара и триггер прихода на склад, а не финальная `done`.
-- В `_to_card` балл поставщика — **реальный** (`_board_scores`: по заказам/претензиям/своевременности
-  через `supplier_id`), пусто если поставщик не связан или нет данных. Карточка авто-заявки
+- Общий `/suppliers/{id}/scorecard` закрыт (410): он смешивал данные юрлиц. Показатели
+  доступны только через `/organizations/{org_id}/suppliers/{id}/scorecard` после проверки доступа.
+  Претензии и общий балл не рассчитываются до подтверждённой принадлежности претензий юрлицу.
+- Новый `/organizations/{org_id}/claims` создаёт ручную претензию с подтверждённым MDM ID
+  поставщика и неизменяемым основанием владения; `order_id`, если задан, сверяется с юрлицом
+  и поставщиком. Повтор использует UUID команды. `/resolve` сохраняет автора, время и до/после;
+  его событие `procurement.claim.resolution_recorded` не создаёт платёж без банковского основания.
+  Исторические и автоматические претензии без юрлица не назначаются автоматически. Общие
+  `/claims` закрыты (410); экран закупок использует только маршрут выбранного юрлица.
+- Карточка авто-заявки
   (`origin='deficit'`) несёт `status_tag="Авто: дефицит склада"` — фронт рендерит его как бейдж
   (переиспользован существующий `FunnelCard.status_tag`, без правки `core/runtime/funnel.py`).
 - `amount` в схемах — `float`, но в модели `Numeric`; в POST приводится `Decimal(str(...))`.

@@ -12,8 +12,11 @@ from modules.procurement.order_creation import router as order_creation_router
 from modules.procurement.order_edit_commands import router as order_edit_router
 from modules.procurement.ownership import router as ownership_router
 from modules.procurement.receipt_documents import router as receipt_router
+from modules.procurement.rfq_scoped import router as rfq_scoped_router
+from modules.procurement.scoped_claims import router as scoped_claims_router
 from modules.procurement.scoped_reads import router as scoped_reads_router
 from modules.procurement.source_gateway import ProcurementSourceService
+from modules.procurement.supplier_contracts import router as supplier_contract_router
 
 
 class ProcurementModule(ModuleContract):
@@ -24,6 +27,7 @@ class ProcurementModule(ModuleContract):
     def register(self, core: Core) -> None:
         core.include_router(routes.router, prefix=self.api_prefix)
         core.include_router(receipt_router, prefix=self.api_prefix)
+        core.include_router(supplier_contract_router, prefix=self.api_prefix)
         core.include_router(additional_expense_router, prefix=self.api_prefix)
         core.include_router(deal_demands_router, prefix=self.api_prefix)
         core.include_router(expected_reservations_router, prefix=self.api_prefix)
@@ -31,6 +35,8 @@ class ProcurementModule(ModuleContract):
         core.include_router(order_creation_router, prefix=self.api_prefix)
         core.include_router(order_edit_router, prefix=self.api_prefix)
         core.include_router(scoped_reads_router, prefix=self.api_prefix)
+        core.include_router(rfq_scoped_router, prefix=self.api_prefix)
+        core.include_router(scoped_claims_router, prefix=self.api_prefix)
         # брак в производстве → автопретензия поставщику (production → procurement, §2.5)
         core.subscribe("production.scrap", events.on_production_scrap)
         # дефицит склада → авто-черновик заявки на закупку (wms → procurement, MRP-lite, круг 3)
@@ -51,7 +57,7 @@ class ProcurementModule(ModuleContract):
         core.register_widget(Widget("procurement", "Закупки", source="procurement.requests"))
         # себестоимость партии наружу — sales читает через фасад для расчёта маржи (§6)
         core.services.landed_cost = LandedCostService()
-        core.services.procurement_source = ProcurementSourceService()
+        core.services.procurement_source = ProcurementSourceService(core.services)
 
 
 def get_module() -> ModuleContract:

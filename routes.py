@@ -5,14 +5,16 @@ import math
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.domain.models import Counterparty
 from core.runtime.core import Core
 from core.runtime.deps import get_core, get_session
 from core.runtime.funnel import FunnelBoardOut, FunnelCard
+from core.services import reference_query
 from core.services.landed_cost import LandedExpense, LandedLine, allocate_landed_cost
 from modules.procurement.cost_estimate import CostLine, CostRates, estimate_china_cost
 from modules.procurement.models import (
@@ -51,7 +53,6 @@ from modules.procurement.schemas import (
     OrderMutationOut,
     OrderPlanIn,
     OrderPlanOut,
-    PurchaseOrderCreate,
     PurchaseOrderLineIn,
     PurchaseOrderLineOut,
     PurchaseOrderOut,
@@ -79,7 +80,6 @@ router = APIRouter(tags=["procurement"])
 
 # Переход в эту стадию воронки = товар физически принят → приход на склад (procurement → wms).
 RECEIVED_STAGE = "qc"
-CLAIM_CLOSED_STATUSES = ("resolved", "rejected")
 
 
 # ───────────────────────── Скоринг поставщика (чистая функция) ─────────────────────────
@@ -557,34 +557,10 @@ async def get_order(order_id: int, session: AsyncSession = Depends(get_session))
     raise HTTPException(410, "Select an organization and use its procurement endpoints")
 
 
-@router.post("/orders", response_model=PurchaseOrderOut, status_code=201)
-async def create_order(
-    payload: PurchaseOrderCreate,
-    core: Core = Depends(get_core),
-    session: AsyncSession = Depends(get_session),
-):
-    """Создать заказ поставщику с позициями. Номер генерируется, если не задан."""
-    if payload.status == "cancelled":
-        raise HTTPException(status_code=422, detail="Нельзя создать заказ сразу в статусе «отменён»")
-    if payload.status == RECEIVED_ORDER_STATUS:
-        raise HTTPException(422, "Создайте заказ и подтвердите юрлицо перед приёмкой")
-    order = PurchaseOrder(
-        supplier=payload.supplier,
-        supplier_id=payload.supplier_id,
-        number=payload.number,
-        status=payload.status,
-        eta_date=payload.eta_date,
-        freight_byn=Decimal(str(payload.freight_byn)),
-    )
-    session.add(order)
-    await session.flush()
-    if not order.number:
-        order.number = f"PO-2026-{order.id:04d}"
-    for ln in payload.lines:
-        session.add(_new_line(order.id, ln))
-    await session.commit()
-    await session.refresh(order)
-    return (await _orders_out(session, [order]))[0]
+@router.post("/orders")
+async def create_order():
+    """Unscoped creation cannot establish a legal-entity owner or MDM supplier."""
+    raise HTTPException(410, "Select an organization and use its catalog-bound order command")
 
 
 def _validate_transition(current: str, new: str) -> None:
@@ -843,6 +819,34 @@ async def cost_estimate(payload: CostEstimateRequest, session: AsyncSession = De
 # ───────────────────────── Справочник поставщиков ─────────────────────────
 
 
+@router.get("/supplier-counterparties")
+async def supplier_counterparties(q: str = Query(min_length=2, max_length=100),
+                                  session: AsyncSession = Depends(get_session)):
+    """Bounded active-MDM picker for procurement users, not a list-all export."""
+    term = q.strip()
+    if len(term) < 2:
+        raise HTTPException(422, "Введите минимум два символа")
+    result = await reference_query.query(session, "core.counterparties", name=term, limit=20)
+    ids = [row["id"] for row in result["result"]]
+    parties = {party.id: party for party in (await session.scalars(
+        select(Counterparty).where(Counterparty.id.in_(ids)))).all()} if ids else {}
+    return {"items": [{"id": identity, "name": parties[identity].legal_name or parties[identity].name,
+                       "unp": parties[identity].unp or ""} for identity in ids if identity in parties]}
+
+
+async def _verify_supplier_identity(session: AsyncSession, counterparty_id: int,
+                                    name: str, unp: str, supplier_id: int | None = None) -> None:
+    """Bind only an active MDM record; never infer identity from a matching UNP."""
+    party = await session.scalar(select(Counterparty).where(
+        Counterparty.id == counterparty_id).with_for_update(read=True))
+    if (party is None or not party.is_active or party.merged_into_id is not None
+            or name != (party.legal_name or party.name) or unp != (party.unp or "")):
+        raise HTTPException(409, "Контрагент MDM изменился или недоступен; выберите его заново")
+    existing = await session.scalar(select(Supplier.id).where(Supplier.counterparty_id == counterparty_id))
+    if existing is not None and existing != supplier_id:
+        raise HTTPException(409, "Для этого контрагента уже есть профиль поставщика")
+
+
 @router.get("/suppliers", response_model=list[SupplierOut])
 async def list_suppliers(session: AsyncSession = Depends(get_session)):
     """Справочник поставщиков (новые первыми)."""
@@ -853,10 +857,16 @@ async def list_suppliers(session: AsyncSession = Depends(get_session)):
 
 @router.post("/suppliers", response_model=SupplierOut, status_code=201)
 async def create_supplier(payload: SupplierCreate, session: AsyncSession = Depends(get_session)):
-    """Завести поставщика. ``unp`` — soft-ref на MDM-контрагента (провенанс)."""
+    """New bound profiles carry a checked MDM ID; legacy unbound API remains readable."""
+    if payload.counterparty_id is not None:
+        await _verify_supplier_identity(session, payload.counterparty_id, payload.name, payload.unp)
     obj = Supplier(**payload.model_dump())
     session.add(obj)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(409, "Профиль контрагента уже существует") from exc
     await session.refresh(obj)
     return obj
 
@@ -876,59 +886,27 @@ async def update_supplier(
     obj = await session.get(Supplier, supplier_id)
     if obj is None:
         raise HTTPException(status_code=404, detail="Поставщик не найден")
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    changes = payload.model_dump(exclude_unset=True)
+    target_id = changes.get("counterparty_id", obj.counterparty_id)
+    if obj.counterparty_id is not None and target_id != obj.counterparty_id:
+        raise HTTPException(409, "Нельзя заменить подтверждённый ID контрагента поставщика")
+    if target_id is not None and {"counterparty_id", "name", "unp"}.intersection(changes):
+        await _verify_supplier_identity(session, target_id, changes.get("name", obj.name),
+                                        changes.get("unp", obj.unp), obj.id)
+    for field, value in changes.items():
         setattr(obj, field, value)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(409, "Профиль контрагента уже существует") from exc
     await session.refresh(obj)
     return obj
 
 
 @router.get("/suppliers/{supplier_id}/scorecard")
 async def supplier_scorecard(supplier_id: int, session: AsyncSession = Depends(get_session)):
-    """Скоркарта поставщика: заказы, претензии (откр/закр), средняя выигранная цена RFQ,
-    компоненты и итоговый балл 0–10. Своевременность — доля заказов, принятых не позже ETA
-    (received_at vs eta_date); None, если нет заказов с обоими полями (honest-empty)."""
-    obj = await session.get(Supplier, supplier_id)
-    if obj is None:
-        raise HTTPException(status_code=404, detail="Поставщик не найден")
-    orders_count = int(
-        (await session.execute(
-            select(func.count()).where(PurchaseOrder.supplier_id == supplier_id)
-        )).scalar_one()
-    )
-    claims = (
-        await session.execute(
-            select(SupplierClaim.status, func.count())
-            .where(SupplierClaim.supplier_id == supplier_id)
-            .group_by(SupplierClaim.status)
-        )
-    ).all()
-    claims_by_status = {s: int(c) for s, c in claims}
-    claims_total = sum(claims_by_status.values())
-    claims_open = claims_total - sum(claims_by_status.get(s, 0) for s in CLAIM_CLOSED_STATUSES)
-    # качество: отклонённые претензии (поставщик не виноват) НЕ снижают балл
-    claims_for_quality = claims_total - claims_by_status.get("rejected", 0)
-    avg_price = (
-        await session.execute(
-            select(func.avg(RfqBid.price_byn)).where(
-                RfqBid.supplier_id == supplier_id, RfqBid.is_winner.is_(True)
-            )
-        )
-    ).scalar_one_or_none()
-    # своевременность: ETA vs факт приёмки (received_at) по принятым заказам поставщика
-    on_time_rate = (await _on_time_rates(session, {supplier_id})).get(supplier_id)
-    scoring = _score_components(orders_count, claims_for_quality, on_time_rate)
-    return {
-        "supplier_id": supplier_id,
-        "orders_count": orders_count,
-        "claims_open": claims_open,
-        "claims_closed": claims_total - claims_open,
-        "claims_total": claims_total,
-        "on_time_rate": on_time_rate,  # None — нет заказов с ETA+фактом (honest-empty)
-        "avg_won_price_byn": float(avg_price) if avg_price is not None else None,
-        "components": scoring["components"],
-        "score": scoring["score"],
-    }
+    raise HTTPException(410, "Select an organization and use its supplier scorecard")
 
 
 # ───────────────────────── RFQ / тендер закупки ─────────────────────────
@@ -959,63 +937,24 @@ async def _bids_of(session: AsyncSession, rfq_id: int) -> list[RfqBid]:
 
 @router.get("/rfq", response_model=list[RfqOut])
 async def list_rfq(session: AsyncSession = Depends(get_session)):
-    """Запросы цен (новые первыми) с предложениями и пометкой лучшей цены."""
-    rfqs = (await session.execute(select(Rfq).order_by(Rfq.id.desc()))).scalars().all()
-    ids = [r.id for r in rfqs]
-    bids_by_rfq: dict[int, list[RfqBid]] = {}
-    if ids:
-        for b in (await session.execute(select(RfqBid).where(RfqBid.rfq_id.in_(ids)))).scalars().all():
-            bids_by_rfq.setdefault(b.rfq_id, []).append(b)
-    return [_rfq_out(r, bids_by_rfq.get(r.id, [])) for r in rfqs]
+    raise HTTPException(410, "Select an organization and an owned purchase request")
 
 
 @router.post("/rfq", response_model=RfqOut, status_code=201)
 async def create_rfq(payload: RfqCreate, session: AsyncSession = Depends(get_session)):
-    """Создать запрос цен (тендер)."""
-    rfq = Rfq(
-        item=payload.item,
-        sku_code=payload.sku_code,
-        qty=Decimal(str(payload.qty)),
-        request_id=payload.request_id,
-        due_date=payload.due_date,
-    )
-    session.add(rfq)
-    await session.commit()
-    await session.refresh(rfq)
-    return _rfq_out(rfq, [])
+    raise HTTPException(410, "Select an organization and an owned purchase request")
 
 
 @router.get("/rfq/{rfq_id}", response_model=RfqOut)
 async def get_rfq(rfq_id: int, session: AsyncSession = Depends(get_session)):
-    rfq = await session.get(Rfq, rfq_id)
-    if rfq is None:
-        raise HTTPException(status_code=404, detail="Запрос цен не найден")
-    return _rfq_out(rfq, await _bids_of(session, rfq_id))
+    raise HTTPException(410, "Select an organization and use its RFQ route")
 
 
 @router.post("/rfq/{rfq_id}/bids", response_model=RfqOut, status_code=201)
 async def add_rfq_bid(
     rfq_id: int, payload: RfqBidIn, session: AsyncSession = Depends(get_session)
 ):
-    """Добавить предложение поставщика к запросу цен."""
-    rfq = await session.get(Rfq, rfq_id)
-    if rfq is None:
-        raise HTTPException(status_code=404, detail="Запрос цен не найден")
-    if rfq.status != "open":
-        raise HTTPException(status_code=409, detail="Запрос цен закрыт — предложения не принимаются")
-    session.add(
-        RfqBid(
-            rfq_id=rfq_id,
-            supplier_id=payload.supplier_id,
-            price_byn=Decimal(str(payload.price_byn)),
-            lead_time_days=payload.lead_time_days,
-            incoterms=payload.incoterms,
-            note=payload.note,
-        )
-    )
-    await session.commit()
-    await session.refresh(rfq)
-    return _rfq_out(rfq, await _bids_of(session, rfq_id))
+    raise HTTPException(410, "Select an organization and use its RFQ route")
 
 
 @router.post("/rfq/{rfq_id}/award", response_model=RfqOut)
@@ -1025,63 +964,7 @@ async def award_rfq(
     core: Core = Depends(get_core),
     session: AsyncSession = Depends(get_session),
 ):
-    """Выбрать победителя тендера: пометить bid победителем, закрыть RFQ, эмит ``procurement.rfq.awarded``."""
-    rfq = await session.get(Rfq, rfq_id)
-    if rfq is None:
-        raise HTTPException(status_code=404, detail="Запрос цен не найден")
-    if rfq.status != "open":
-        raise HTTPException(status_code=409, detail="Запрос цен уже закрыт — победитель выбран/отменён")
-    bids = await _bids_of(session, rfq_id)
-    winner = next((b for b in bids if b.id == payload.bid_id), None)
-    if winner is None:
-        raise HTTPException(status_code=404, detail="Предложение не найдено в этом запросе")
-    for b in bids:
-        b.is_winner = b.id == winner.id
-    rfq.status = "awarded"
-    core.event_bus.emit(
-        session,
-        "procurement.rfq.awarded",
-        {
-            "rfq_id": rfq.id,
-            "supplier_id": winner.supplier_id,
-            "price_byn": str(winner.price_byn),
-            "sku_code": rfq.sku_code,
-            "entity_ref": f"rfq:{rfq.id}",
-        },
-    )
-
-    # P7: выигранный тендер → черновик PO у победителя (та же транзакция) + апстрим прогноза
-    # кэша для finance (procurement.po.drafted). PO остаётся draft (не «в пути») до размещения.
-    planned_amount = (Decimal(str(winner.price_byn)) * Decimal(str(rfq.qty))).quantize(Decimal("0.01"))
-    order = PurchaseOrder(supplier="", supplier_id=winner.supplier_id, status="draft")
-    session.add(order)
-    await session.flush()
-    if not order.number:
-        order.number = f"PO-2026-{order.id:04d}"
-    session.add(
-        PurchaseOrderLine(
-            order_id=order.id,
-            sku_code=rfq.sku_code,
-            qty=Decimal(str(rfq.qty)),
-            goods_value_byn=planned_amount,  # цена победителя × кол-во = плановая стоимость позиции
-        )
-    )
-    core.event_bus.emit(
-        session,
-        "procurement.po.drafted",
-        {
-            "po_ref": order.number,
-            "supplier_id": winner.supplier_id,
-            "planned_amount": str(planned_amount),
-            "currency": "BYN",
-            "eta_date": order.eta_date.isoformat() if order.eta_date else None,
-            "deal_id": None,  # PO обслуживает много сделок — привязки к сделке нет (см. фриз §2)
-        },
-    )
-
-    await session.commit()
-    await session.refresh(rfq)
-    return _rfq_out(rfq, await _bids_of(session, rfq_id), created_order_id=order.id)
+    raise HTTPException(410, "Select an organization and use its RFQ route")
 
 
 # ───────────────────────── Претензии поставщикам ─────────────────────────
@@ -1089,22 +972,12 @@ async def award_rfq(
 
 @router.get("/claims", response_model=list[SupplierClaimOut])
 async def list_claims(session: AsyncSession = Depends(get_session)):
-    """Претензии поставщикам (брак из производства и пр.), новые первыми."""
-    return (
-        await session.execute(select(SupplierClaim).order_by(SupplierClaim.id.desc()))
-    ).scalars().all()
+    raise HTTPException(410, "Select an organization and use its supplier claim register")
 
 
 @router.post("/claims", response_model=SupplierClaimOut, status_code=201)
 async def create_claim(payload: SupplierClaimCreate, session: AsyncSession = Depends(get_session)):
-    """Ручное заведение претензии закупщиком (источник ``manual``)."""
-    data = payload.model_dump()
-    data["amount_byn"] = None if data["amount_byn"] is None else Decimal(str(data["amount_byn"]))
-    obj = SupplierClaim(**data, status="open", source="manual")
-    session.add(obj)
-    await session.commit()
-    await session.refresh(obj)
-    return obj
+    raise HTTPException(410, "Select an organization and use its supplier claim command")
 
 
 @router.patch("/claims/{claim_id}", response_model=SupplierClaimOut)
@@ -1114,42 +987,7 @@ async def update_claim(
     core: Core = Depends(get_core),
     session: AsyncSession = Depends(get_session),
 ):
-    """Назначить поставщика / урегулировать претензию. При resolved/rejected — эмит
-    ``procurement.claim.resolved`` (finance/качество подпишутся)."""
-    obj = await session.get(SupplierClaim, claim_id)
-    if obj is None:
-        raise HTTPException(status_code=404, detail="Претензия не найдена")
-    was_closed = obj.status in CLAIM_CLOSED_STATUSES
-    for field, value in payload.model_dump(exclude_unset=True).items():
-        setattr(obj, field, value)
-    if not was_closed and obj.status in CLAIM_CLOSED_STATUSES:
-        # P6: резолв номера заказа (order_code → PurchaseOrder.number) для finance. None, если
-        # претензия не привязана к заказу. Себестоимость НЕ пересчитываем (риск порчи факт-cost).
-        # ponytail: фактический пересчёт unit_landed_cost по возврату — Горизонт 2.
-        order_id = None
-        if obj.order_code:
-            order_id = (
-                await session.execute(
-                    select(PurchaseOrder.id).where(PurchaseOrder.number == obj.order_code)
-                )
-            ).scalar_one_or_none()
-        core.event_bus.emit(
-            session,
-            "procurement.claim.resolved",
-            {
-                "claim_id": obj.id,
-                "supplier_id": obj.supplier_id,
-                "claim_type": obj.claim_type,
-                "amount_byn": None if obj.amount_byn is None else str(obj.amount_byn),
-                "resolution": obj.resolution,
-                "status": obj.status,
-                "order_id": order_id,
-                "entity_ref": f"claim:{obj.id}",
-            },
-        )
-    await session.commit()
-    await session.refresh(obj)
-    return obj
+    raise HTTPException(410, "Select an organization and use its supplier claim command")
 
 
 # ───────────────────────── План сбора машины (этапы Китай → Минск) ─────────────────────────

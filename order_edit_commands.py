@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import (
@@ -23,14 +23,16 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db.base import Base
-from core.domain.models import OutboxEvent
+from core.domain.models import OutboxEvent, Sku
 from core.runtime.deps import get_core
 from modules.procurement import routes
 from modules.procurement.models import PurchaseOrder, PurchaseOrderLine, TransportMethod
 from modules.procurement.order_creation import line_result
 from modules.procurement.ownership import (
     PurchaseOwnership,
+    current_read_scope,
     effective_plan_user,
+    owned_plan_source,
     plan_context,
     request_command_hash,
 )
@@ -45,9 +47,10 @@ from modules.procurement.schemas import (
     ScopedOrderPlanOut,
 )
 
-Action = Literal["add_line", "delete_line", "header", "status", "plan"]
+Action = Literal["add_line", "delete_line", "header", "status", "plan", "save"]
 INPUTS = {"add_line": EditorLineInput, "delete_line": EditorDeleteInput, "header": EditorHeaderInput, "status": EditorStatusInput, "plan": EditorPlanInput}
-CODES = {"command_abandoned", "source_unavailable", "order_not_editable", "line_unavailable", "transition_not_allowed", "transport_method_unavailable"}
+SAVE_STEPS = ("add_line", "header", "plan", "status")
+CODES = {"command_abandoned", "source_unavailable", "order_not_editable", "line_unavailable", "transition_not_allowed", "transport_method_unavailable", "sku_catalog_changed"}
 
 
 class EditCommand(BaseModel):
@@ -74,15 +77,29 @@ class EditCommand(BaseModel):
 
     @model_validator(mode="after")
     def canonical(self):
-        parsed = INPUTS[self.action].model_validate(self.payload)
-        if self.action == "header" and not parsed.model_fields_set:
-            raise ValueError("At least one header field is required")
-        data = parsed.model_dump(mode="json", exclude_unset=self.action == "header")
-        for name, scale in {"qty": 2, "goods_value_byn": 2, "weight": 3, "volume": 4, "freight_byn": 2}.items():
-            if name in data:
-                data[name] = format(Decimal(data[name]), f".{scale}f")
-        self.payload = data
+        if self.action == "save":
+            if not self.payload or set(self.payload) - set(SAVE_STEPS):
+                raise ValueError("Save requires one or more supported changes")
+            self.payload = {step: normalize(step, self.payload[step])
+                            for step in SAVE_STEPS if step in self.payload}
+        else:
+            self.payload = normalize(self.action, self.payload)
         return self
+
+
+def normalize(action, payload):
+    parsed = INPUTS[action].model_validate(payload)
+    if action == "header" and not parsed.model_fields_set:
+        raise ValueError("At least one header field is required")
+    data = parsed.model_dump(mode="json", exclude_unset=action == "header")
+    if action == "add_line":
+        for field in ("sku_id", "sku_title", "sku_unit"):
+            if data[field] is None:
+                data.pop(field)
+    for name, scale in {"qty": 2, "goods_value_byn": 2, "weight": 3, "volume": 4, "freight_byn": 2}.items():
+        if name in data:
+            data[name] = format(Decimal(data[name]), f".{scale}f")
+    return data
 
 
 class PurchaseOrderEditCommand(Base):
@@ -90,7 +107,7 @@ class PurchaseOrderEditCommand(Base):
     __table_args__ = (
         UniqueConstraint("organization_id", "request_key"),
         CheckConstraint("organization_id > 0 AND target_order_id > 0", name="edit_positive_ids"),
-        CheckConstraint("action IN ('add_line','delete_line','header','status','plan')", name="edit_action"),
+        CheckConstraint("action IN ('add_line','delete_line','header','status','plan','save')", name="edit_action"),
         CheckConstraint("(outcome='applied' AND ownership_id IS NOT NULL) OR (outcome='rejected' AND ownership_id IS NULL)", name="edit_outcome"),
         {"schema": "procurement"},
     )
@@ -148,11 +165,17 @@ def valid_line(value):
 
 
 def valid_effect(action, payload, effect, org, order_id, actor):
+    if action == "save":
+        return (isinstance(effect, dict) and set(effect) == set(payload)
+                and all(valid_effect(step, payload[step], effect[step], org, order_id, actor)
+                        for step in SAVE_STEPS if step in payload))
     if action in {"add_line", "delete_line"}:
         if not exact(effect, ["line"]) or not valid_line(effect["line"]):
             return False
         line = effect["line"]
-        return ({k: v for k, v in line.items() if k != "id"} == payload if action == "add_line" else line["id"] == payload["line_id"])
+        return ({k: v for k, v in line.items() if k != "id"} ==
+                {k: v for k, v in payload.items() if k not in {"sku_id", "sku_title", "sku_unit"}}
+                if action == "add_line" else line["id"] == payload["line_id"])
     if action == "header":
         return (exact(effect, ["before", "after"]) and exact(effect["before"], payload) and effect["after"] == payload
             and all((isinstance(v, str) if k in {"supplier", "freight_byn"} else v is None or type(v) is int if k == "supplier_id" else v is None or isinstance(v, str)) for k, v in effect["before"].items()))
@@ -240,6 +263,58 @@ def check_target(command, order_id):
         raise HTTPException(409, "Command target differs from path")
 
 
+def _history_changes(action, payload, effect) -> list[dict]:
+    if action == "header":
+        return [{"field": field, "before": before, "after": effect["after"][field]}
+                for field, before in effect["before"].items()]
+    if action == "status":
+        return [{"field": "status", "before": effect["from"], "after": effect["to"]}]
+    if action in {"add_line", "delete_line"}:
+        line = effect["line"]
+        after = line if action == "add_line" else None
+        if after is not None and "sku_id" in payload:
+            after = {**line, "catalog_snapshot": {
+                "sku_id": payload["sku_id"],
+                "title": payload["sku_title"],
+                "unit": payload["sku_unit"],
+            }}
+        return [{"field": f"lines/{line['id']}",
+                 "before": line if action == "delete_line" else None,
+                 "after": after}]
+    return [{"field": "plan", "before": None, "before_unknown": True, "after": {
+        "transport_method_code": effect["transport_method_code"],
+        "target_arrival_date": effect["target_arrival_date"],
+    }}]
+
+
+def history_changes(row: PurchaseOrderEditCommand) -> list[dict]:
+    effect, payload = row.result["effect"], row.command["payload"]
+    if row.action == "save":
+        return [change for step in SAVE_STEPS if step in payload
+                for change in _history_changes(step, payload[step], effect[step])]
+    return _history_changes(row.action, payload, effect)
+
+
+@router.get("/organizations/{org_id}/orders/{order_id}/edit-history")
+async def edit_history(org_id: int, order_id: int, after_id: int = Query(0, ge=0),
+                       ctx=Depends(current_read_scope)):
+    session, _ = ctx
+    _, order = await owned_plan_source(session, org_id, "order", order_id)
+    rows = (await session.scalars(select(PurchaseOrderEditCommand).where(
+        PurchaseOrderEditCommand.organization_id == org_id,
+        PurchaseOrderEditCommand.target_order_id == order_id,
+        PurchaseOrderEditCommand.outcome == "applied",
+        PurchaseOrderEditCommand.id > after_id,
+    ).order_by(PurchaseOrderEditCommand.id).limit(51))).all()
+    page = rows[:50]
+    for row in page:
+        await validate_receipt(session, row)
+    return {"organization_id": org_id, "order_id": order_id, "number": order.number,
+            "items": [{"id": row.id, "changed_at": row.created_at, "changed_by": row.actor,
+                       "action": row.action, "changes": history_changes(row)} for row in page],
+            "next_after_id": page[-1].id if len(rows) > 50 else None}
+
+
 @router.post("/organizations/{org_id}/orders/{order_id}/edit-commands/reconcile")
 async def reconcile(org_id: int, order_id: int, command: EditCommand, ctx=Depends(writer)):
     session, actor = ctx
@@ -260,6 +335,31 @@ class RecordingBus:
         self.events.extend(x for x in session.new if x not in before and isinstance(x, OutboxEvent))
 
 
+async def apply_step(action, data, *, order_id, row, line, session, org_id, actor, core):
+    payload = INPUTS[action].model_validate(data)
+    if action == "add_line":
+        ack = await routes.apply_add_line(order_id, payload, session, org_id, actor)
+        return {"line": line_result(await session.get(PurchaseOrderLine, ack["affected_line_id"]))}
+    if action == "delete_line":
+        effect = {"line": line_result(line)}
+        await routes.apply_delete_line(order_id, line.id, session, org_id, actor)
+        return effect
+    if action == "header":
+        def scalar(value):
+            return str(value) if isinstance(value, Decimal) else value.isoformat() if hasattr(value, "isoformat") else value
+        before = {k: scalar(getattr(row, k)) for k in data}
+        await routes.apply_order_header(order_id, payload, session, org_id, actor)
+        return {"before": before, "after": data}
+    if action == "status":
+        previous = row.status
+        recorder = RecordingBus(core.event_bus)
+        await routes.apply_order_status(order_id, payload, SimpleNamespace(event_bus=recorder), session, org_id, actor)
+        await session.flush()
+        return {"from": previous, "to": row.status, "received_at": row.received_at.isoformat() if row.received_at else None,
+                "event_ids": [x.id for x in recorder.events]}
+    return (await routes.apply_order_plan(order_id, payload, session, org_id, actor)).model_dump(mode="json")
+
+
 @router.post("/organizations/{org_id}/orders/{order_id}/edit-commands")
 async def execute(org_id: int, order_id: int, command: EditCommand, ctx=Depends(writer), core=Depends(get_core)):
     session, actor = ctx
@@ -270,47 +370,41 @@ async def execute(org_id: int, order_id: int, command: EditCommand, ctx=Depends(
     owner = await session.scalar(select(PurchaseOwnership).where(PurchaseOwnership.organization_id == org_id,
         PurchaseOwnership.kind == "order", PurchaseOwnership.source_id == order_id))
     row = await session.scalar(select(PurchaseOrder).where(PurchaseOrder.id == order_id).with_for_update().execution_options(populate_existing=True)) if owner else None
+    changes = command.payload if command.action == "save" else {command.action: command.payload}
     code = None
     if row is None:
         code = "source_unavailable"
-    elif command.action in {"add_line", "delete_line", "header"} and row.status in {"received", "cancelled"}:
+    elif (command.action == "save" or set(changes) & {"add_line", "delete_line", "header"}) and row.status in {"received", "cancelled"}:
         code = "order_not_editable"
     line = None
-    if not code and command.action == "delete_line":
-        line = await session.get(PurchaseOrderLine, command.payload["line_id"])
+    if not code and "delete_line" in changes:
+        line = await session.get(PurchaseOrderLine, changes["delete_line"]["line_id"])
         if line is None or line.order_id != order_id:
             code = "line_unavailable"
-    if not code and command.action == "status":
+    if not code and "status" in changes:
         try:
-            routes._validate_transition(row.status, command.payload["status"])
+            routes._validate_transition(row.status, changes["status"]["status"])
         except HTTPException:
             code = "transition_not_allowed"
-    if not code and command.action == "plan":
-        method = await session.scalar(select(TransportMethod).where(TransportMethod.code == command.payload["transport_method_code"]))
-        if method is None and command.payload["transport_method_code"] not in DEFAULT_METHODS:
+    if not code and "plan" in changes:
+        method = await session.scalar(select(TransportMethod).where(TransportMethod.code == changes["plan"]["transport_method_code"]))
+        if method is None and changes["plan"]["transport_method_code"] not in DEFAULT_METHODS:
             code = "transport_method_unavailable"
+    if not code and "add_line" in changes and "sku_id" in changes["add_line"]:
+        selected = changes["add_line"]
+        sku = await session.scalar(select(Sku).where(
+            Sku.id == selected["sku_id"]).with_for_update(read=True))
+        if (sku is None or not sku.is_active or sku.code != selected["sku_code"]
+                or sku.title != selected["sku_title"]
+                or sku.unit != selected["sku_unit"]):
+            code = "sku_catalog_changed"
     if code:
         return response(await persist(session, org_id, actor, command, code=code))
-    payload = INPUTS[command.action].model_validate(command.payload)
-    if command.action == "add_line":
-        ack = await routes.apply_add_line(order_id, payload, session, org_id, actor)
-        effect = {"line": line_result(await session.get(PurchaseOrderLine, ack["affected_line_id"]))}
-    elif command.action == "delete_line":
-        effect = {"line": line_result(line)}
-        await routes.apply_delete_line(order_id, line.id, session, org_id, actor)
-    elif command.action == "header":
-        def scalar(value):
-            return str(value) if isinstance(value, Decimal) else value.isoformat() if hasattr(value, "isoformat") else value
-        before = {k: scalar(getattr(row, k)) for k in command.payload}
-        await routes.apply_order_header(order_id, payload, session, org_id, actor)
-        effect = {"before": before, "after": command.payload}
-    elif command.action == "status":
-        previous = row.status
-        recorder = RecordingBus(core.event_bus)
-        await routes.apply_order_status(order_id, payload, SimpleNamespace(event_bus=recorder), session, org_id, actor)
-        await session.flush()
-        effect = {"from": previous, "to": row.status, "received_at": row.received_at.isoformat() if row.received_at else None,
-                  "event_ids": [x.id for x in recorder.events]}
+    if command.action == "save":
+        effect = {step: await apply_step(step, changes[step], order_id=order_id, row=row, line=None,
+                                      session=session, org_id=org_id, actor=actor, core=core)
+                  for step in SAVE_STEPS if step in changes}
     else:
-        effect = (await routes.apply_order_plan(order_id, payload, session, org_id, actor)).model_dump(mode="json")
+        effect = await apply_step(command.action, command.payload, order_id=order_id, row=row, line=line,
+                                  session=session, org_id=org_id, actor=actor, core=core)
     return response(await persist(session, org_id, actor, command, owner=owner, effect=effect))

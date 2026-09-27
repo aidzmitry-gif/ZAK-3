@@ -6,7 +6,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Статус заказа — закрытый набор (опечатка тихо пропустила бы фиксацию landed cost на приёмке).
 # Должен совпадать с ORDER_STATUSES в models.py.
@@ -220,8 +220,9 @@ class SupplierClaimUpdate(BaseModel):
 
 
 class SupplierBase(BaseModel):
+    counterparty_id: int | None = Field(default=None, gt=0)
     name: str
-    unp: str = ""  # soft-ref на MDM-контрагента (провенанс)
+    unp: str = ""
     country: str = ""
     flag: str = ""
     contact_person: str = ""
@@ -239,6 +240,7 @@ class SupplierCreate(SupplierBase):
 
 
 class SupplierUpdate(BaseModel):
+    counterparty_id: int | None = Field(default=None, gt=0)
     name: str | None = None
     unp: str | None = None
     country: str | None = None
@@ -399,10 +401,20 @@ class EditorInput(BaseModel):
 
 class EditorLineInput(EditorInput):
     sku_code: str = Field(min_length=1, max_length=64)
+    sku_id: int | None = Field(default=None, gt=0, le=2147483647)
+    sku_title: str | None = Field(default=None, min_length=1, max_length=255)
+    sku_unit: str | None = Field(default=None, min_length=1, max_length=16)
     qty: Decimal = Field(default=Decimal("1.00"), gt=0)
     goods_value_byn: Decimal = Decimal("0.00")
     weight: Decimal = Decimal("0.000")
     volume: Decimal = Decimal("0.0000")
+
+    @model_validator(mode="after")
+    def paired_sku_snapshot(self):
+        fields = (self.sku_id, self.sku_title, self.sku_unit)
+        if any(value is not None for value in fields) and not all(value is not None for value in fields):
+            raise ValueError("SKU catalog ID, title and unit must be supplied together")
+        return self
 
 
 class EditorHeaderInput(EditorInput):
