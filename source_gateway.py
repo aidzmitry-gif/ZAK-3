@@ -52,7 +52,9 @@ class ProcurementSourceService:
             raise ValueError("Posted receipt options do not match its source version")
         prepared = await prepare_receipt(session, organization_id, receipt_id, options,
                                          frozen_counterparty_id=frozen_identity)
-        return {"document": prepared.document, "entry_id": posting.entry_id,
+        return {"document": prepared.document,
+                "verified_counterparty_id": prepared.verified_counterparty_id,
+                "entry_id": posting.entry_id,
                 "digest": posting.digest, "actor": posting.actor}
 
     async def warehouse_receipt_source(self, session, organization_id, receipt_id, expected_version):
