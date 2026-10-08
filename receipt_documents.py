@@ -35,6 +35,8 @@ from core.services.auth import get_current_user
 from core.services.procurement import (
     ReceiptAccountingConfirmation,
     ReceiptAccountingOptions,
+    ReceiptForeignAmounts,
+    ReceiptForeignExchange,
 )
 
 
@@ -71,6 +73,9 @@ class ReceiptItem(Input):
     vat_rate: Money = Field(le=100)
     vat_amount: Money
     vat_basis: str = Field(min_length=1, max_length=200)
+    foreign_amounts: ReceiptForeignAmounts | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
 
 
 class ReceiptContent(Input):
@@ -93,9 +98,17 @@ class ReceiptContent(Input):
                                         exclude_if=lambda value: value is None)
     explanation: str = Field(min_length=1, max_length=700)
     items: list[ReceiptItem] = Field(min_length=1, max_length=300)
+    foreign_exchange: ReceiptForeignExchange | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def selected_supplier_pair(self):
+        if self.foreign_exchange is None:
+            if any(item.foreign_amounts is not None for item in self.items):
+                raise ValueError("Original amounts require explicit foreign exchange")
+        elif any(item.foreign_amounts is None for item in self.items):
+            raise ValueError("Foreign exchange requires original amounts on every line")
         if (self.supplier_id is None) != (self.supplier_unp is None):
             raise ValueError("Supplier ID and UNP snapshot must be selected together")
         if (self.warehouse_id is None) != (self.warehouse_title is None):
@@ -271,9 +284,13 @@ def correction_line_identity(item):
             item.unit, item.lot)
 
 
-def correction_line_values_changed(original_items, corrected_items, fields):
-    original_values = Counter(tuple(getattr(item, field) for field in fields) for item in original_items)
-    corrected_values = Counter(tuple(getattr(item, field) for field in fields) for item in corrected_items)
+def correction_line_values_changed(original_items, corrected_items, fields, *, foreign_fields=()):
+    def values(item):
+        return (tuple(getattr(item, field) for field in fields)
+                + tuple(getattr(item.foreign_amounts, field, None) for field in foreign_fields))
+
+    original_values = Counter(values(item) for item in original_items)
+    corrected_values = Counter(values(item) for item in corrected_items)
     if original_values != corrected_values:
         return True
     grouped = []
@@ -282,7 +299,7 @@ def correction_line_values_changed(original_items, corrected_items, fields):
         for item in items:
             identity = correction_line_identity(item)
             values_by_identity.setdefault(identity, Counter()).update([
-                tuple(getattr(item, field) for field in fields),
+                values(item),
             ])
         grouped.append(values_by_identity)
     original_by_identity, corrected_by_identity = grouped
@@ -299,16 +316,22 @@ def classify_receipt_correction(original, corrected):
         != Counter(correction_line_identity(item) + (item.quantity,) for item in corrected.items)
     )
     inventory_value_change = correction_line_values_changed(
-        original.items, corrected.items, ("net_amount",),
+        original.items, corrected.items, ("net_amount",), foreign_fields=("net_amount",),
     )
     vat_change = correction_line_values_changed(
         original.items, corrected.items, ("vat_rate", "vat_amount", "vat_basis"),
+        foreign_fields=("vat_amount",),
     )
     primary_document_change = any(
         getattr(original, field) != getattr(corrected, field)
         for field in ("invoice_reference", "document_date", "supplier", "supplier_id", "supplier_unp",
                       "contract", "contract_id", "contract_basis", "warehouse", "warehouse_id",
-                      "warehouse_title")
+                      "warehouse_title", "foreign_exchange")
+    )
+    # Original amounts change the primary facts even if BYN cents are identical.
+    primary_document_change = primary_document_change or correction_line_values_changed(
+        original.items, corrected.items,
+        ("foreign_amounts",),
     )
     operation_date_change = original.operation_date != corrected.operation_date
     explanation_only = not any((physical_change, inventory_value_change, vat_change,
