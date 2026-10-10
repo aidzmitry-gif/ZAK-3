@@ -6,7 +6,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, model_validator
@@ -23,6 +23,7 @@ from sqlalchemy import (
     event,
     func,
     select,
+    text,
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
@@ -121,6 +122,16 @@ class ReceiptContent(Input):
 class ReceiptCreate(Input):
     key: str = Field(min_length=1, max_length=160)
     document: ReceiptContent
+
+
+class ReceiptSourceCreate(Input):
+    namespace: str = Field(min_length=1, max_length=64)
+    entity: Literal["Document_ПриобретениеТоваровУслуг"]
+    source_guid: str = Field(min_length=36, max_length=36)
+    expected_data_version: str = Field(min_length=1, max_length=255)
+    expected_source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_organization_guid: str = Field(min_length=36, max_length=36)
+    mapping: dict[str, Any]
 
 
 class ReceiptEdit(Input):
@@ -393,6 +404,65 @@ async def list_documents(org_id: int, ctx=Depends(scoped)):
 
 @router.post("/organizations/{org_id}/receipt-documents", status_code=201)
 async def create_document(org_id: int, data: ReceiptCreate, ctx=Depends(scoped), access=Depends(context)):
+    await guard_external_purchase_key(ctx[0], data.key)
+    return await _create_document(org_id, data, ctx, access)
+
+
+async def guard_external_purchase_key(session, key):
+    from modules.accounting.onec_purchase_import import STAGED_PURCHASE_PREFIX
+
+    if key.startswith(STAGED_PURCHASE_PREFIX):
+        raise HTTPException(422, "Staged source keys require source admission")
+    if key.startswith("onec:purchase:"):
+        await lock_purchase_import(session, key)
+        imported = await session.scalar(select(ReceiptDocument.id).where(
+            ReceiptDocument.source_key.startswith(STAGED_PURCHASE_PREFIX + key.removeprefix("onec:purchase:") + ":"),
+        ))
+        if imported is not None:
+            raise HTTPException(409, "Source identity already has a staged receipt")
+
+
+async def lock_purchase_import(session, legacy_key):
+    if session.get_bind().dialect.name == "postgresql":
+        await session.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:scope,0))"),
+                              {"scope": "purchase-import:" + legacy_key})
+
+
+@router.post("/organizations/{org_id}/receipt-documents/from-source", status_code=201)
+async def create_source_document(org_id: int, data: ReceiptSourceCreate,
+                                 ctx=Depends(scoped), access=Depends(context)):
+    from core.domain.document_source import DocumentSourceRevision
+    from modules.accounting.onec_purchase_import import build_staged_receipt_draft
+
+    session, _ = ctx
+    await access[1].source_owner_authority(session, org_id, access[2])
+    if session.get_bind().dialect.name == "postgresql":
+        await session.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:scope,0))"),
+                              {"scope": "document:" + data.namespace})
+    source = await session.scalar(select(DocumentSourceRevision).where(
+        DocumentSourceRevision.namespace == data.namespace,
+        DocumentSourceRevision.entity == data.entity,
+        DocumentSourceRevision.source_guid == data.source_guid,
+    ).order_by(DocumentSourceRevision.revision_no.desc()).limit(1)
+        .execution_options(populate_existing=True))
+    if source is None:
+        raise HTTPException(404, "Staged source observation not found")
+    if source.source_sha != data.expected_source_sha256 or source.data_version != data.expected_data_version:
+        raise HTTPException(409, "Staged source revision changed")
+    receipt = build_staged_receipt_draft(source, data.mapping, organization_id=org_id,
+                                       source_organization_guid=data.source_organization_guid)
+    legacy_key = "onec:purchase:" + receipt.key.split(":")[-2]
+    await lock_purchase_import(session, legacy_key)
+    collision = await session.scalar(select(ReceiptDocument.id).where(
+        (ReceiptDocument.source_key == legacy_key)
+        | ((ReceiptDocument.source_key == receipt.key) & (ReceiptDocument.organization_id != org_id)),
+    ))
+    if collision is not None:
+        raise HTTPException(409, "Source identity needs explicit legacy or organization reconciliation")
+    return await _create_document(org_id, receipt, ctx, access)
+
+
+async def _create_document(org_id, data, ctx, access):
     session, actor = ctx
     existing = await session.scalar(select(ReceiptDocument).where(
         ReceiptDocument.organization_id == org_id, ReceiptDocument.source_key == data.key,
@@ -425,6 +495,7 @@ async def create_document(org_id: int, data: ReceiptCreate, ctx=Depends(scoped),
 @router.post("/organizations/{org_id}/receipt-documents/{receipt_id}/correction-drafts", status_code=201)
 async def create_correction_draft(org_id: int, receipt_id: int, data: ReceiptCorrectionDraft,
                                   ctx=Depends(scoped)):
+    await guard_external_purchase_key(ctx[0], data.key)
     session, actor = ctx
     original = await session.scalar(select(ReceiptDocument).where(
         ReceiptDocument.id == receipt_id, ReceiptDocument.organization_id == org_id,
@@ -568,6 +639,10 @@ async def edit_document(org_id: int, receipt_id: int, data: ReceiptEdit, ctx=Dep
     ).with_for_update())
     if row is None:
         raise HTTPException(404, "Receipt not found")
+    from modules.accounting.onec_purchase_import import STAGED_PURCHASE_PREFIX
+
+    if row.source_key.startswith(STAGED_PURCHASE_PREFIX):
+        raise HTTPException(409, "Imported source receipt requires an explicit correction workflow")
     payload = data.document.model_dump(mode="json")
     repeated = await session.scalar(select(ReceiptRevision).where(
         ReceiptRevision.receipt_id == row.id, ReceiptRevision.request_key == data.key,
