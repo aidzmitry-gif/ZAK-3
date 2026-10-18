@@ -1,6 +1,6 @@
 """Durable editor receipts. Organization lock serializes execute against reconcile."""
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from types import SimpleNamespace
 from typing import Literal
 from uuid import UUID
@@ -164,6 +164,53 @@ def valid_line(value):
         return False
 
 
+def valid_landed(item, org, order_id, received_at):
+    """Verify the frozen calculation without reading today's catalogue or tariffs."""
+    try:
+        if not exact(item, ["event_id", "payload"]) or type(item["event_id"]) is not int or item["event_id"] <= 0:
+            return False
+        p = item["payload"]
+        if (not isinstance(p, dict) or type(p.get("organization_id")) is not int
+                or type(p.get("purchase_order_id")) is not int or p.get("organization_id") != org
+                or p.get("purchase_order_id") != order_id or p.get("stage") != "actual"
+                or p.get("currency") != "BYN"):
+            return False
+        c = p.get("calculation")
+        if (not exact(c, ["version", "received_at", "lines", "freight_byn", "duty_pct"])
+                or type(c["version"]) is not int or c["version"] != 1
+                or not received_at or c["received_at"] != received_at):
+            return False
+        datetime.fromisoformat(received_at)
+        lines = c["lines"]
+        if (not isinstance(lines, list) or not lines or not all(valid_line(x) for x in lines)
+                or len({x["id"] for x in lines}) != len(lines)):
+            return False
+        if not isinstance(c["freight_byn"], str):
+            return False
+        freight = Decimal(c["freight_byn"])
+        duty = Decimal(c["duty_pct"]) if isinstance(c["duty_pct"], str) else Decimal("0")
+        if (c["duty_pct"] is not None and not isinstance(c["duty_pct"], str)
+                or not freight.is_finite() or freight < 0 or not duty.is_finite() or duty < 0):
+            return False
+        source_lines = [SimpleNamespace(**{k: Decimal(v) if k in {"qty", "goods_value_byn", "weight", "volume"} else v
+                                          for k, v in x.items()}) for x in lines]
+        result, groups = routes._order_allocation(source_lines, freight)
+        selected = [x for x in result["lines"] if x["sku_code"] == p.get("sku_code")]
+        if len(selected) != 1:
+            return False
+        row = selected[0]
+        factor = 1 + duty / Decimal("100")
+        unit = (row["unit_landed_cost"] * factor).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+        total = (row["landed_total"] * factor).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        return (all(isinstance(p.get(k), str) for k in ("qty", "unit_landed_cost_byn", "total_landed_byn"))
+                and Decimal(p["qty"]) == groups[p["sku_code"]]["qty"]
+                and Decimal(p["unit_landed_cost_byn"]) == unit
+                and Decimal(p["total_landed_byn"]) == total
+                and total.is_finite() and 0 <= total < Decimal("1000000000000"))
+    except (ValueError, TypeError, KeyError, ArithmeticError):
+        return False
+
+
 def valid_effect(action, payload, effect, org, order_id, actor):
     if action == "save":
         return (isinstance(effect, dict) and set(effect) == set(payload)
@@ -180,7 +227,19 @@ def valid_effect(action, payload, effect, org, order_id, actor):
         return (exact(effect, ["before", "after"]) and exact(effect["before"], payload) and effect["after"] == payload
             and all((isinstance(v, str) if k in {"supplier", "freight_byn"} else v is None or type(v) is int if k == "supplier_id" else v is None or isinstance(v, str)) for k, v in effect["before"].items()))
     if action == "status":
-        return (exact(effect, ["from", "to", "received_at", "event_ids"]) and effect["from"] in {"draft", "ordered", "shipped", "customs", "received", "cancelled"}
+        old_keys = ["from", "to", "received_at", "event_ids"]
+        if not (exact(effect, old_keys) or exact(effect, [*old_keys, "landed"])):
+            return False
+        if "landed" in effect:
+            items = effect["landed"]
+            if (not isinstance(items, list) or not isinstance(effect["event_ids"], list)
+                    or not all(valid_landed(x, org, order_id, effect["received_at"]) for x in items)
+                    or any(x["event_id"] not in effect["event_ids"] for x in items)
+                    or len({x["event_id"] for x in items}) != len(items)
+                    or len({x["payload"]["sku_code"] for x in items}) != len(items)
+                    or (items and (effect["to"] != "received" or effect["from"] == "received"))):
+                return False
+        return (effect["from"] in {"draft", "ordered", "shipped", "customs", "received", "cancelled"}
             and effect["to"] == payload["status"] and (effect["received_at"] is None or isinstance(effect["received_at"], str))
             and isinstance(effect["event_ids"], list) and all(type(x) is int and x > 0 for x in effect["event_ids"])
             and len(set(effect["event_ids"])) == len(effect["event_ids"])
@@ -356,7 +415,9 @@ async def apply_step(action, data, *, order_id, row, line, session, org_id, acto
         await routes.apply_order_status(order_id, payload, SimpleNamespace(event_bus=recorder), session, org_id, actor)
         await session.flush()
         return {"from": previous, "to": row.status, "received_at": row.received_at.isoformat() if row.received_at else None,
-                "event_ids": [x.id for x in recorder.events]}
+                "event_ids": [x.id for x in recorder.events],
+                "landed": [{"event_id": x.id, "payload": x.payload} for x in recorder.events
+                           if x.event_type == "procurement.landed_cost.calculated"]}
     return (await routes.apply_order_plan(order_id, payload, session, org_id, actor)).model_dump(mode="json")
 
 
