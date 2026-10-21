@@ -457,6 +457,7 @@ async def _fixate_landed_cost(session: AsyncSession, order: PurchaseOrder, event
         return
 
     from core.services import sku_master  # фасад ядра; локальный импорт — без цикла модулей
+    from modules.procurement.order_creation import line_result
 
     shipment_id = order.number or f"purchase_order:{order.id}"
     existing = {
@@ -517,6 +518,14 @@ async def _fixate_landed_cost(session: AsyncSession, order: PurchaseOrder, event
                 "shipment_id": shipment_id,
                 "stage": "actual",  # факт приёмки (finance читает qty+total, не ветвится по stage)
                 "purchase_order_id": order.id,
+                "currency": "BYN",
+                "calculation": {
+                    "version": 1,
+                    "received_at": order.received_at.isoformat(),
+                    "lines": [line_result(line) for line in lines],
+                    "freight_byn": str(order.freight_byn),
+                    "duty_pct": str(duty) if duty is not None else None,
+                },
                 "fx_rate": None,
                 "fx_date": None,
                 "fx_rate_basis": None,

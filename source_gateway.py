@@ -151,3 +151,58 @@ class ProcurementSourceService:
             "document": revision.document, "actor": revision.actor,
             "created_at": revision.created_at,
         }
+
+    async def landed_financial_source(self, session, organization_id, purchase_order_id, event_id):
+        from core.domain.models import OutboxEvent
+        from modules.procurement.models import PurchaseOrder
+        from modules.procurement.order_edit_commands import (
+            PurchaseOrderEditCommand,
+            validate_receipt,
+        )
+        from modules.procurement.ownership import PurchaseOwnership
+
+        if any(type(x) is not int or x <= 0 for x in (organization_id, purchase_order_id, event_id)):
+            raise ValueError("Exact organization, purchase order and delivery event are required")
+        owner = await session.scalar(select(PurchaseOwnership).where(
+            PurchaseOwnership.kind == "order", PurchaseOwnership.source_id == purchase_order_id,
+            PurchaseOwnership.organization_id == organization_id,
+        ).with_for_update(read=True).execution_options(populate_existing=True))
+        order = await session.scalar(select(PurchaseOrder).where(
+            PurchaseOrder.id == purchase_order_id,
+        ).with_for_update().execution_options(populate_existing=True)) if owner else None
+        if order is None or order.status != "received" or order.received_at is None:
+            raise ValueError("Owned received purchase-order source is unavailable")
+        receipts = (await session.scalars(select(PurchaseOrderEditCommand).where(
+            PurchaseOrderEditCommand.ownership_id == owner.id,
+            PurchaseOrderEditCommand.target_order_id == order.id,
+            PurchaseOrderEditCommand.organization_id == organization_id,
+            PurchaseOrderEditCommand.outcome == "applied",
+            PurchaseOrderEditCommand.action.in_(("status", "save")),
+        ).order_by(PurchaseOrderEditCommand.id).with_for_update(read=True)
+            .execution_options(populate_existing=True))).all()
+        matches = []
+        for receipt in receipts:
+            effect = receipt.result.get("effect", {})
+            if receipt.action == "save":
+                effect = effect.get("status", {})
+            if event_id not in effect.get("event_ids", []):
+                continue
+            await validate_receipt(session, receipt)
+            if (effect["from"] == "received" or effect["to"] != "received"
+                    or effect["received_at"] != order.received_at.isoformat()):
+                raise ValueError("Landed calculation does not match the received purchase order")
+            for item in effect.get("landed", []):
+                if item["event_id"] == event_id:
+                    matches.append((receipt, item["payload"]))
+        if len(matches) != 1:
+            raise ValueError("Exact landed calculation receipt is unavailable or ambiguous")
+        receipt, payload = matches[0]
+        event = await session.scalar(select(OutboxEvent).where(OutboxEvent.id == event_id)
+            .execution_options(populate_existing=True))
+        if (event is None or event.event_type != "procurement.landed_cost.calculated"
+                or event.version != 1 or event.payload != payload):
+            raise ValueError("Landed event differs from its immutable calculation receipt")
+        return {"organization_id": organization_id, "purchase_order_id": order.id,
+                "receipt_id": receipt.id, "event_id": event_id, "sku_code": payload["sku_code"],
+                "document_date": order.received_at.date().isoformat(), "currency": "BYN",
+                "amount": payload["total_landed_byn"], "payload": payload}
