@@ -322,6 +322,13 @@ async def _allocate(session: AsyncSession, org_id: int, actor: str, demand_id: i
     deal = await session.scalar(select(Deal).where(Deal.id == demand.deal_id).with_for_update())
     if deal is None or deal.stage == "lost" or deal.stage.endswith("_lost"):
         raise HTTPException(409, "A lost deal cannot receive a new procurement allocation")
+    source_item_id = await session.scalar(
+        select(DealItem.id).where(
+            DealItem.id == demand.deal_item_id, DealItem.deal_id == demand.deal_id
+        ).with_for_update()
+    )
+    if source_item_id is None:
+        raise HTTPException(409, "Confirm the organization, CRM deal, deal item and SKU")
     owner = await session.scalar(
         select(PurchaseOwnership).where(
             PurchaseOwnership.organization_id == org_id,

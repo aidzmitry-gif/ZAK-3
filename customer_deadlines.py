@@ -35,16 +35,23 @@ async def review(session, org_id, order):
         arrival = arrival_deadline(deadline)
         target = order.target_arrival_date
         items.append({"reservation_id": reservation.id, "deal_id": deal.id,
+            "deal_number": deal.number,
             "order_line_id": reservation.order_line_id, "sku_code": reservation.sku_code,
             "outstanding_qty": f"{remaining:.2f}", "ship_deadline": deal.ship_deadline,
             "required_arrival": arrival.isoformat() if arrival else None,
+            "slack_days": (arrival - target).days if arrival and target else None,
+            "penalty_rate_pct": f"{deal.penalty_rate_pct:.2f}" if deal.penalty_rate_pct is not None else None,
+            "penalty_cap_pct": f"{deal.penalty_cap_pct:.2f}" if deal.penalty_cap_pct is not None else None,
+            "penalty_terms": deal.penalty_terms,
             "deadline_status": "dated" if deadline else "missing_or_unparsed",
             "at_risk": (target is None or target > arrival) if arrival else None})
     dated = [x["required_arrival"] for x in items if x["required_arrival"]]
+    known_slack = [x["slack_days"] for x in items if x["slack_days"] is not None]
     unresolved = sum(x["deadline_status"] != "dated" for x in items)
     return {"organization_id": org_id, "order_id": order.id, "status": "live_review",
         "source": "outstanding_expected_reservations", "items": items,
         "earliest_required_arrival": min(dated) if dated else None,
+        "slack_days": min(known_slack) if known_slack else None,
         "unresolved_deadlines": unresolved, "complete_customer_demand": False,
         "at_risk": True if any(x["at_risk"] is True for x in items)
                    else (None if unresolved or not items else False)}
