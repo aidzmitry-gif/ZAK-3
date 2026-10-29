@@ -123,7 +123,7 @@ async def owned_sources(org_id: int, kind: Literal["order", "request"],
                         freight_byn=str(row.freight_byn), lines=lines.get(row.id, []))
         else:
             item.update(stage=row.stage, item=row.item, quantity=str(row.qty),
-                        planned_amount=str(row.amount), due_date=row.due_date)
+                        planned_amount=str(row.amount), due_date=row.due_date, origin=row.origin)
         items.append(item)
     return {"organization_id": org_id, "items": items,
             "next_after_id": page[-1].id if len(rows) > 50 else None}
